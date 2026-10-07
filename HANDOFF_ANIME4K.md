@@ -266,3 +266,23 @@ curl -s https://api.github.com/repos/heloka/Venera-SSR/actions/runs?per_page=5
 - RX 9070 XT 上已用同一上游引擎直接运行 SE/Pro：日志识别到 GPU，单页分别约 1.3/1.0 秒；
   这不是新版应用的端到端验收。当前尚未用便携包完成真实漫画阅读测试，也未验证所有倍率、
   中文路径、透明/奇数尺寸、显存不足恢复、开关/对比和缓存复用；需要在本机继续验收。
+
+### 闪退排查和热修（2026-10-07）
+
+- 用户在 SE 开启超分时遇到闪退。当前配置记录漫画专属项 `hunhuan@copy_manga`：SE、2×、
+  长边上限 1600、超分已开启。应用日志没有写出 Real-CUGAN 异常，Windows 也没有匹配到
+  `venera.exe` 的应用崩溃事件。
+- 崩溃遗留的临时目录包含完整 `output.png`（1626×2400）。用同一 `input.png` 在便携包目录
+  直接执行 SE GPU 命令成功，设备日志为 `[0 AMD Radeon RX 9070 XT]`，输出 SHA-256 与遗留图一致。
+  因此引擎推理本身成功；具体是哪一步导致应用退出仍未确定。
+- Windows 事件日志当天多次记录 `LiveKernelEvent`、`P1=141`（16:07 和 16:50，早于这次报告）。
+  这提示可能存在显卡驱动/引擎超时，但不能据此认定它就是本次应用闪退原因。
+- 热修提交 `8e55379566826ce69e6cfbc4cc8a71ccf17dffcf` 对默认 100% 混合、无透明通道图片，
+  直接复用引擎 PNG，并校验 PNG 头和输出尺寸，避免再完整解码、复制和重新编码输出图。
+  Flutter 分析、测试、Windows Release 构建及模型打包均通过。
+- [热修构建记录](https://github.com/heloka/Venera-SSR/actions/runs/37601158525)，artifact
+  `11473800681`，包 SHA-256：
+  `36b7fe0ef95dbbea9209dbb59da7e58d00fb1789891c15e4a6862747071d69df`。
+  热修包并排安装在
+  `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-hotfix-8e55379-windows`；未启动应用，
+  需由用户验证同一漫画页面能否正常显示。
