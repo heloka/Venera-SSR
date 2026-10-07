@@ -170,50 +170,18 @@ void main() {
         expect(m.scale, greaterThanOrEqualTo(2), reason: m.id);
         expect(m.defaultUrls, isNotEmpty, reason: m.id);
         expect(m.channels, anyOf(1, 3), reason: m.id);
+        // 对齐 localManga 的 ONNX 引擎：仅收录"输出 = 输入 × 原生倍数"的模型，
+        // 分块参数沿用其默认（核心 512 + 重叠 16）
+        expect(m.tileCore, 512, reason: m.id);
+        expect(m.tileOverlap, 16, reason: m.id);
+        expect(m.inputMultiple, anyOf(1, 2), reason: m.id);
       }
     });
 
-    test('tile size satisfies model alignment and padding constraints', () {
-      for (final m in UpscaleModels.all) {
-        expect(m.tileIn % m.inputAlign, 0,
-            reason: 'tileIn must be a multiple of inputAlign for ${m.id}');
-        expect(m.tilePad * 2, lessThan(m.tileIn),
-            reason: 'core size must be positive for ${m.id}');
-        // waifu2x cunet/swin 是 valid-conv 模型，单侧裁剪约 18px，pad 必须覆盖
-        if (m.id.startsWith('waifu2x')) {
-          expect(m.tilePad, greaterThanOrEqualTo(18), reason: m.id);
-        }
-      }
-    });
-
-    test('bundled model exists as asset declaration for default id', () {
-      // 默认模型 ACNet 必须内置（保证桌面/Android 开箱即用）
+    test('bundled model exists as asset declaration for ACNet', () {
       final acnet = UpscaleModels.byId('anime4k_acnet');
       expect(acnet.id, 'anime4k_acnet');
       expect(acnet.bundledAssetPath, isNotNull);
-    });
-  });
-
-  group('computeTilePlan', () {
-    test('tiles exactly cover the image', () {
-      for (final (w, h) in [(1, 1), (100, 80), (352, 352), (353, 700), (1600, 1200)]) {
-        final plan = computeTilePlan(w, h, 384, 16);
-        expect(plan.core, 384 - 2 * 16);
-        expect(plan.cols * plan.core, greaterThanOrEqualTo(w));
-        expect(plan.rows * plan.core, greaterThanOrEqualTo(h));
-        expect((plan.cols - 1) * plan.core, lessThan(w));
-        expect((plan.rows - 1) * plan.core, lessThan(h));
-      }
-    });
-
-    test('single tile when image fits in core size', () {
-      final plan = computeTilePlan(300, 200, 384, 16);
-      expect(plan.cols, 1);
-      expect(plan.rows, 1);
-    });
-
-    test('rejects pad larger than half tile', () {
-      expect(() => computeTilePlan(100, 100, 256, 200), throwsArgumentError);
     });
   });
 

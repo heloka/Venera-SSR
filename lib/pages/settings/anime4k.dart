@@ -428,8 +428,20 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
               ),
             ),
           ),
-        // v4 输入长边上限（速度/内存旋钮，值越大越清晰也越慢）
-        if (isV4)
+        // v4 输入长边上限：超过上限的页面跳过超分、保持原图（对齐 localManga）
+        if (isV4) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Text(
+                "Pages longer than this keep the original image (upscale skipped)".tl,
+                style: TextStyle(
+                  color: context.colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -466,6 +478,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
               ),
             ),
           ),
+        ],
         // v1 专用参数（Scale/Push/Grad）：仅 v1 显示
         SliverAnimatedVisibility(
           visible: !isV4,
@@ -495,19 +508,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ],
           ),
         ),
-        // v4 强度（倍数由模型决定，仅调节强度）
-        SliverAnimatedVisibility(
-          visible: isV4,
-          child: _SliderSetting(
-            title:
-                "Upscale Intensity (v4 · ${Anime4KV4ModelManager.selectedDef.scale}x)"
-                    .tl,
-            settingsIndex: "anime4KV4Intensity",
-            min: 0.3,
-            max: 1.2,
-            interval: 0.05,
-          ),
-        ),
+        // v4 输出倍数细调已在上方"Output Scale"区块
         ListTile(
           title: Text("Clear Anime4K Cache".tl),
           trailing: const Icon(Icons.delete_sweep),

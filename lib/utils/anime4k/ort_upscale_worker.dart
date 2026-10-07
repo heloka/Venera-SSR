@@ -85,7 +85,6 @@ class OrtUpscaleWorker {
       'modelPath': request.modelPath,
       'def': request.model,
       'maxInputEdge': request.maxInputEdge,
-      'intensity': request.intensity,
     });
     try {
       return await completer.future.timeout(timeout);
@@ -156,6 +155,17 @@ class OrtUpscaleWorker {
         }
         _progress.remove(message['id']);
         break;
+      case 'skipped':
+        final skippedId = message['id'] as int?;
+        final reason = message['reason']?.toString() ?? '已跳过';
+        if (skippedId != null) {
+          final completer = _pending.remove(skippedId);
+          if (completer != null && !completer.isCompleted) {
+            completer.completeError(UpscaleSkippedException(reason));
+          }
+          _progress.remove(skippedId);
+        }
+        break;
       case 'error':
         final id = message['id'] as int?;
         final error = message['error']?.toString() ?? 'unknown error';
@@ -215,7 +225,6 @@ void _workerMain(SendPort reply) {
             modelPath: message['modelPath'] as String,
             model: message['def'] as UpscaleModelDef,
             maxInputEdge: (message['maxInputEdge'] as num?)?.toInt() ?? 1600,
-            intensity: (message['intensity'] as num?)?.toDouble() ?? 1.0,
           );
           // 会话与请求的模型不一致时按需重载（防御性：正常流程 run 前必先 load）
           if (session == null || sessionPath != request.modelPath) {
@@ -241,6 +250,8 @@ void _workerMain(SendPort reply) {
           replyMsg({'event': 'resetDone', 'id': id});
           break;
       }
+    } on UpscaleSkippedException catch (e) {
+      replyMsg({'event': 'skipped', 'id': id, 'reason': e.reason});
     } catch (e, s) {
       replyMsg({'event': 'error', 'id': id, 'error': '$e\n$s'});
     }

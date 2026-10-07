@@ -7,27 +7,36 @@ import 'package:onnxruntime/onnxruntime.dart';
 
 import 'upscale_models.dart';
 
+/// 页面超过输入长边上限时的"跳过"信号（对齐 localManga 的 skipped 状态）：
+/// 大图本身分辨率已足够，保持原图比"缩小再超分"更清晰。
+class UpscaleSkippedException implements Exception {
+  final String reason;
+  UpscaleSkippedException(this.reason);
+
+  @override
+  String toString() => reason;
+}
+
 /// ONNX Runtime 分块超分核心（纯 Dart，无 Flutter 依赖，可在 Isolate/CLI 中复用）。
 ///
-/// 处理流程（与 Android 原生 ColorizeEngine.colorizeEsrgan 对齐）：
-///  1. 解码图片（可选按输入长边上限缩小，控制耗时/内存）；
-///  2. 3 通道模型：RGB 归一化为 float32 [0,1]；1 通道模型（ACNet）：提取 Y 亮度；
-///  3. 固定边长分块（tileIn，含每侧 tilePad 的 replicate 重叠）逐块推理，
-///     valid-conv 模型（waifu2x cunet/swin 输出比 2×输入小 36px）按输出实际尺寸推导裁剪；
-///  4. intensity 在 [0,1] 浮点空间围绕 0.5 做对比缩放（与原生一致）；
-///  5. 1 通道模型用双线性放大的 Cr/Cb 色度重建色彩；alpha 通道双线性放大；
-///  6. 编码 PNG 返回。
+/// 处理流程逐行为对齐 localManga 的 server/upscale/engine.py：
+///  1. 解码图片；长边超过 [OrtUpscaleRequest.maxInputEdge] 时抛出
+///     [UpscaleSkippedException]（localManga 的 skipped 策略：超限页保持原图，
+///     不做"缩小再超分"）；
+///  2. RGB 归一化 float32 [0,1]（1 通道模型走 Y 亮度，色度双线性重建）；
+///  3. 分块：核心 tile（默认 512）+ 每侧 16 重叠上下文，边缘块用图像边界收拢，
+///     输入边长不满足 [UpscaleModelDef.inputMultiple] 时边缘复制补齐
+///     （等价 np.pad mode='edge'）；
+///  4. 输出 ×255 clip 写回核心区；输出恒为 输入×原生倍数；
+///  5. 倍数细调：请求倍数低于原生时推理后等比缩小；
+///  6. alpha 通道双线性放大；编码 PNG。
 class OrtUpscaleRequest {
   final Uint8List imageBytes;
   final String modelPath;
   final UpscaleModelDef model;
 
-  /// 输入长边上限（像素），超过则先等比缩小；0 = 不限制。
-  /// 这是桌面 CPU 推理的主要速度旋钮（参考 localManga 的 max_input_edge_px）。
+  /// 输入长边上限（像素）；超过则跳过超分（保持原图）。0 = 不限制。
   final int maxInputEdge;
-
-  /// 对比强度（围绕 0.5 缩放），1.0 = 不变，与 Android 原生 v4 语义一致。
-  final double intensity;
 
   /// 输出倍数（倍数细调）：低于 [UpscaleModelDef.scale] 时把推理结果等比缩小；
   /// null/大于等于原生倍数时保持原生输出。
@@ -38,27 +47,8 @@ class OrtUpscaleRequest {
     required this.modelPath,
     required this.model,
     this.maxInputEdge = 1600,
-    this.intensity = 1.0,
     this.outputScale,
   });
-}
-
-/// 分块计划：core 为每块实际贡献的源边长，(cols × rows) 块覆盖整图。
-class TilePlan {
-  final int core;
-  final int cols;
-  final int rows;
-
-  const TilePlan(this.core, this.cols, this.rows);
-}
-
-/// 计算 (w × h) 图像在 tileIn/pad 下的分块计划。
-TilePlan computeTilePlan(int w, int h, int tileIn, int pad) {
-  final core = tileIn - 2 * pad;
-  if (core <= 0) {
-    throw ArgumentError('tileIn must be larger than 2*pad');
-  }
-  return TilePlan(core, (w / core).ceil(), (h / core).ceil());
 }
 
 /// 创建 ONNX 会话。
@@ -75,7 +65,8 @@ OrtSession createOrtSession(String modelPath, {int? intraOpThreads}) {
   return OrtSession.fromBuffer(bytes, options);
 }
 
-/// 执行分块超分，返回 PNG 字节。失败抛异常，由调用方（worker/service）兜底。
+/// 执行分块超分，返回 PNG 字节。跳过抛 [UpscaleSkippedException]，
+/// 其余失败抛异常，由调用方（worker/service）兜底。
 Uint8List runOrtUpscale(
   OrtUpscaleRequest request, {
   OrtSession? session,
@@ -87,33 +78,27 @@ Uint8List runOrtUpscale(
     throw Exception('failed to decode image for upscale');
   }
 
-  // 输入长边上限：等比缩小源图，控制 tile 数量与耗时。
-  var source = src;
+  final w = src.width;
+  final h = src.height;
+
+  // 输入长边上限：超过则跳过（保持原图），对齐 localManga 的 skipped 策略
   final maxEdge = request.maxInputEdge;
-  if (maxEdge > 0 && math.max(src.width, src.height) > maxEdge) {
-    final factor = maxEdge / math.max(src.width, src.height);
-    source = img.copyResize(
-      src,
-      width: (src.width * factor).round(),
-      height: (src.height * factor).round(),
-      interpolation: img.Interpolation.linear,
-    );
+  if (maxEdge > 0 && math.max(w, h) > maxEdge) {
+    throw UpscaleSkippedException(
+        '原图边长 ${math.max(w, h)}px 超过上限 ${maxEdge}px');
   }
 
-  final w = source.width;
-  final h = source.height;
   final scale = model.scale;
-  final tileIn = model.tileIn;
-  final pad = model.tilePad;
-  final plan = computeTilePlan(w, h, tileIn, pad);
+  final tileCore = model.tileCore > 0 ? model.tileCore : 512;
+  final overlap = model.tileOverlap;
 
-  // 源图平面数据（按 [0,255] uint8 提取，归一化在 tile 填充时进行）。
+  // 源图平面数据（uint8，归一化在 tile 填充时进行）
   final srcR = Uint8List(w * h);
   final srcG = Uint8List(w * h);
   final srcB = Uint8List(w * h);
   final srcA = Uint8List(w * h);
-  final hasAlpha = source.numChannels >= 4 || source.hasAlpha;
-  for (final px in source) {
+  final hasAlpha = src.numChannels >= 4 || src.hasAlpha;
+  for (final px in src) {
     final i = px.y * w + px.x;
     srcR[i] = px.r.toInt();
     srcG[i] = px.g.toInt();
@@ -122,79 +107,93 @@ Uint8List runOrtUpscale(
   }
 
   final out = img.Image(width: w * scale, height: h * scale, numChannels: 4);
-  // numChannels=4 时底层为 uint8 RGBA 连续缓冲，直接写入避免逐像素 setPixel 的开销。
+  // numChannels=4 时底层为 uint8 RGBA 连续缓冲，直接写入避免逐像素 setPixel 的开销
   final outData = (out.data as img.ImageDataUint8).data;
   final outStride = out.width * 4;
 
-  // 会话：worker 传入常驻会话；未传入则临时创建（CLI/测试路径）。
+  // 会话：worker 传入常驻会话；未传入则临时创建（CLI/测试路径）
   final ownSession = session ?? createOrtSession(request.modelPath);
   try {
     final inputName = ownSession.inputNames.first;
-    final plane = tileIn * tileIn;
-    final totalTiles = plan.cols * plan.rows;
+    final totalTiles =
+        ((h + tileCore - 1) ~/ tileCore) * ((w + tileCore - 1) ~/ tileCore);
     int doneTiles = 0;
 
-    for (int cy = 0; cy < plan.rows; cy++) {
-      for (int cx = 0; cx < plan.cols; cx++) {
-        final x0 = cx * plan.core;
-        final y0 = cy * plan.core;
-        final coreW = math.min(plan.core, w - x0);
-        final coreH = math.min(plan.core, h - y0);
+    // 核心 tile 网格（对齐 localManga _run_tiles_pixels 的循环结构）
+    for (int coreTop = 0; coreTop < h; coreTop += tileCore) {
+      final coreBottom = math.min(h, coreTop + tileCore);
+      final top = math.max(0, coreTop - overlap);
+      final bottom = math.min(h, coreBottom + overlap);
+      for (int coreLeft = 0; coreLeft < w; coreLeft += tileCore) {
+        final coreRight = math.min(w, coreLeft + tileCore);
+        final left = math.max(0, coreLeft - overlap);
+        final right = math.min(w, coreRight + overlap);
 
-        // ---- 填充输入 tile（replicate 边界 = BORDER_REPLICATE） ----
-        final inData = Float32List(model.channels * plane);
-        for (int ty = 0; ty < tileIn; ty++) {
-          int sy = y0 - pad + ty;
-          sy = sy < 0 ? 0 : (sy >= h ? h - 1 : sy);
+        final srcW = right - left;
+        final srcH = bottom - top;
+
+        // 补齐到 inputMultiple（边缘复制，等价 np.pad mode='edge'）
+        final padY = (srcH % model.inputMultiple == 0)
+            ? 0
+            : model.inputMultiple - srcH % model.inputMultiple;
+        final padX = (srcW % model.inputMultiple == 0)
+            ? 0
+            : model.inputMultiple - srcW % model.inputMultiple;
+        final tileH = srcH + padY;
+        final tileW = srcW + padX;
+        final tilePlane = tileH * tileW;
+
+        final inData = Float32List(model.channels * tilePlane);
+        for (int ty = 0; ty < tileH; ty++) {
+          final sy = top + (ty < srcH ? ty : srcH - 1);
           final rowOff = sy * w;
-          for (int tx = 0; tx < tileIn; tx++) {
-            int sx = x0 - pad + tx;
-            sx = sx < 0 ? 0 : (sx >= w ? w - 1 : sx);
+          for (int tx = 0; tx < tileW; tx++) {
+            final sx = left + (tx < srcW ? tx : srcW - 1);
             final si = rowOff + sx;
-            final di = ty * tileIn + tx;
+            final di = ty * tileW + tx;
             if (model.channels == 1) {
               inData[di] =
                   (0.299 * srcR[si] + 0.587 * srcG[si] + 0.114 * srcB[si]) /
                       255.0;
             } else {
               inData[di] = srcR[si] / 255.0;
-              inData[plane + di] = srcG[si] / 255.0;
-              inData[2 * plane + di] = srcB[si] / 255.0;
+              inData[tilePlane + di] = srcG[si] / 255.0;
+              inData[2 * tilePlane + di] = srcB[si] / 255.0;
             }
           }
         }
 
-        // ---- 推理 ----
+        // 推理
         final input = OrtValueTensor.createTensorWithDataList(
-            [inData], [1, model.channels, tileIn, tileIn]);
+            [inData], [1, model.channels, tileH, tileW]);
         final outputs = ownSession.run(OrtRunOptions(), {inputName: input});
-        final outFlat = _flattenTensor(outputs[0]?.value);
+        final tensor = _flattenTensor(outputs[0]?.value);
         input.release();
         outputs[0]?.release();
 
-        // ---- 由输出长度推导空间边长与裁剪（valid-conv 模型输出更小） ----
-        final outPlane = outFlat.length ~/ model.channels;
-        final outEdge = math.sqrt(outPlane).toInt();
-        final cropStart = ((tileIn - outEdge ~/ scale) ~/ 2).clamp(0, pad);
-        final base = (pad - cropStart) * scale;
-        final coreOutW = coreW * scale;
-        final coreOutH = coreH * scale;
+        // 输出空间尺寸（可变分块下为矩形，从张量维度取实际 H/W）
+        final outTileH = tensor.height;
+        final outTileW = tensor.width;
+        final outPlane = outTileH * outTileW;
 
-        // ---- 写回核心区 ----
-        final intensity = request.intensity;
-        final applyIntensity = (intensity - 1.0).abs() > 1e-6;
+        // 裁剪核心区写回（对齐 localManga 的 crop 映射）
+        final cropTop = (coreTop - top) * scale;
+        final cropLeft = (coreLeft - left) * scale;
+        final coreOutW = (coreRight - coreLeft) * scale;
+        final coreOutH = (coreBottom - coreTop) * scale;
+        final outTop = coreTop * scale;
+        final outLeft = coreLeft * scale;
+
         for (int py = 0; py < coreOutH; py++) {
-          final dstY = y0 * scale + py;
-          var outRow = dstY * outStride + x0 * scale * 4;
-          var si = (base + py) * outEdge + base;
+          var outRow = (outTop + py) * outStride + outLeft * 4;
+          var si = (cropTop + py) * outTileW + cropLeft;
           for (int px = 0; px < coreOutW; px++) {
             double vr, vg, vb;
             if (model.channels == 1) {
-              final y01 = _unit(outFlat[si]);
-              // 色度：从源图双线性插值 Cr/Cb（dst 像素中心对应源坐标）
+              final y01 = _unit(tensor.data[si]);
               final chroma = _chromaBilinear(
-                  (x0 * scale + px + 0.5) / scale - 0.5,
-                  (dstY + 0.5) / scale - 0.5,
+                  (outLeft + px + 0.5) / scale - 0.5,
+                  (outTop + py + 0.5) / scale - 0.5,
                   w,
                   h,
                   srcR,
@@ -204,18 +203,13 @@ Uint8List runOrtUpscale(
               vg = y01 - 0.714 * chroma[0] - 0.344 * chroma[1];
               vb = y01 + 1.773 * chroma[1];
             } else if (model.inputZero255) {
-              vr = outFlat[si] / 255.0;
-              vg = outFlat[outPlane + si] / 255.0;
-              vb = outFlat[2 * outPlane + si] / 255.0;
+              vr = tensor.data[si] / 255.0;
+              vg = tensor.data[outPlane + si] / 255.0;
+              vb = tensor.data[2 * outPlane + si] / 255.0;
             } else {
-              vr = outFlat[si];
-              vg = outFlat[outPlane + si];
-              vb = outFlat[2 * outPlane + si];
-            }
-            if (applyIntensity) {
-              vr = (vr - 0.5) * intensity + 0.5;
-              vg = (vg - 0.5) * intensity + 0.5;
-              vb = (vb - 0.5) * intensity + 0.5;
+              vr = tensor.data[si];
+              vg = tensor.data[outPlane + si];
+              vb = tensor.data[2 * outPlane + si];
             }
             outData[outRow] = (_unit(vr) * 255).round();
             outData[outRow + 1] = (_unit(vg) * 255).round();
@@ -291,7 +285,7 @@ int _clampIdx(int x, int y, int w, int h) {
   return cy * w + cx;
 }
 
-/// YCbCr 色度 (Cr, Cb) 双线性插值，返回围绕 128 的偏差（已归一到 [0,1] 空间）。
+/// YCbCr 色度 (Cr, Cb) 双线性插值，返回 [0,1] 空间中围绕 128 的偏差。
 List<double> _chromaBilinear(double fx, double fy, int w, int h, Uint8List r,
     Uint8List g, Uint8List b) {
   final x0 = fx.floorToDouble().toInt();
@@ -316,7 +310,7 @@ List<double> _chromaBilinear(double fx, double fy, int w, int h, Uint8List r,
   ];
 }
 
-/// 像素 (x, y) 的 Cr/Cb（围绕 128 的 0-255 值），与 OpenCV BGR2YCrCb 一致。
+/// 像素 (x, y) 的 Cr/Cb（0-255 值），与 OpenCV BGR2YCrCb 一致。
 List<double> _chromaAt(
     int x, int y, int w, int h, Uint8List r, Uint8List g, Uint8List b) {
   final i = _clampIdx(x, y, w, h);
@@ -324,8 +318,25 @@ List<double> _chromaAt(
   return [(r[i] - yy) * 0.713 + 128.0, (b[i] - yy) * 0.564 + 128.0];
 }
 
-/// ORT 输出张量（嵌套 List）展平为 Float32List。
-Float32List _flattenTensor(dynamic value) {
+/// ORT 输出张量的展平结果：数据 + 实际空间尺寸（可变分块下为矩形）
+class _FlatTensor {
+  final Float32List data;
+  final int height;
+  final int width;
+  const _FlatTensor(this.data, this.height, this.width);
+}
+
+/// ORT 输出张量（嵌套 List，shape [N, C, H, W]）展平，并提取 H/W。
+_FlatTensor _flattenTensor(dynamic value) {
+  // 沿第一元素下探获取各维长度：[N, C, H, W]
+  final dims = <int>[];
+  dynamic cur = value;
+  while (cur is List) {
+    dims.add(cur.length);
+    cur = cur.isEmpty ? null : cur[0];
+  }
+  final w = dims.isNotEmpty ? dims.last : 0;
+  final h = dims.length >= 2 ? dims[dims.length - 2] : 0;
   final out = <double>[];
   void walk(dynamic v) {
     if (v is double) {
@@ -340,5 +351,5 @@ Float32List _flattenTensor(dynamic value) {
   }
 
   walk(value);
-  return Float32List.fromList(out);
+  return _FlatTensor(Float32List.fromList(out), h, w);
 }

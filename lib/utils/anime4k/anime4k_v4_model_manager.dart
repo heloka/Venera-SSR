@@ -35,7 +35,7 @@ class Anime4KV4ModelManager {
   static const int _validModelMinSize = 8 * 1024;
 
   static const String _selectedModelKey = 'anime4kV4_selected_model';
-  static String _selectedModelId = 'anime4k_acnet';
+  static String _selectedModelId = 'anime4k_x4';
 
   static List<String> _modelUrls = [];
   static bool _urlsLoaded = false;

@@ -230,13 +230,6 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
                   ),
                 ),
               Tooltip(
-                message: "AI Upscale".tl,
-                child: IconButton(
-                  icon: const Icon(Icons.auto_awesome),
-                  onPressed: () => _showUpscaleQuickPanel(context),
-                ),
-              ),
-              Tooltip(
                 message: "Settings".tl,
                 child: IconButton(
                   icon: const Icon(Icons.settings),

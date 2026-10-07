@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
-/// 超分任务状态：等待排队 → 超分中 → 已处理 / 失败
-enum UpscaleJobStatus { queued, processing, done, failed }
+/// 超分任务状态：等待排队 → 超分中 → 已处理 / 已跳过 / 失败
+enum UpscaleJobStatus { queued, processing, done, skipped, failed }
 
 /// 单个超分任务的状态记录（阅读器状态胶囊与任务面板展示用）
 class UpscaleJob {
@@ -127,18 +127,23 @@ class UpscaleStatusTracker extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 任务完成（成功或失败）
-  void finish(String key, {bool success = true, String? error}) {
+  /// 任务完成（成功 / 跳过 / 失败）
+  void finish(String key,
+      {bool success = true, bool skipped = false, String? error}) {
     final job = _jobs[key];
     if (job == null) {
       return;
     }
     job
-      ..status = success ? UpscaleJobStatus.done : UpscaleJobStatus.failed
+      ..status = skipped
+          ? UpscaleJobStatus.skipped
+          : (success ? UpscaleJobStatus.done : UpscaleJobStatus.failed)
       ..progress = success ? 1.0 : job.progress
       ..error = error
       ..finishedAt = DateTime.now();
-    final retention = success ? doneRetention : failedRetention;
+    final retention = skipped
+        ? doneRetention
+        : (success ? doneRetention : failedRetention);
     _clearTimers[key]?.cancel();
     _clearTimers[key] = Timer(retention, () {
       _jobs.remove(key);

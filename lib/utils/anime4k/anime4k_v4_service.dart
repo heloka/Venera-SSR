@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:isolate';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
@@ -13,7 +14,6 @@ import 'package:venera/foundation/log.dart';
 import 'anime4k_v4_model_manager.dart';
 import 'ort_upscale_core.dart';
 import 'ort_upscale_worker.dart';
-import 'upscale_models.dart' show resolveOutputScale;
 import 'upscale_status_tracker.dart';
 
 /// Anime4K v4 超分服务（带模型版本）
@@ -65,7 +65,7 @@ class Anime4KV4Service {
       }
       // 同步“当前选中模型”（默认 ACNet 2x），再抽取内置模型/确认可用
       await Anime4KV4ModelManager.setSelectedModelId(
-        (appdata.settings['anime4KV4Model'] as String?) ?? 'anime4k_acnet',
+        (appdata.settings['anime4KV4Model'] as String?) ?? 'anime4k_x4',
       );
       await Anime4KV4ModelManager.extractBundledModelIfNeeded();
       _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
@@ -151,7 +151,6 @@ class Anime4KV4Service {
   Future<Uint8List?> _upscaleOnNative(
     Uint8List imageBytes,
     String modelPath,
-    double intensity,
     bool useNnapi,
   ) async {
     try {
@@ -160,7 +159,7 @@ class Anime4KV4Service {
         'modelPath': modelPath,
         'type': 'esrgan',
         'useNnapi': useNnapi,
-        'intensity': intensity,
+        'intensity': 1.0,
       });
       return result;
     } catch (e, s) {
@@ -178,10 +177,12 @@ class Anime4KV4Service {
   /// 模型缺失或平台无推理后端时返回 null（上层据此回退 v1 或保持原图）。
   /// [outputScale] 为倍数细调：低于模型原生倍数时推理后缩小；null = 原生。
   /// [label] 为任务状态展示标签（如 "第 3 页"）。
+  ///
+  /// 输入策略对齐 localManga：长边超过 `anime4KV4MaxEdge` 的页面跳过超分
+  /// （返回 null，reader 保持原图），不做"缩小再超分"。
   Future<Uint8List?> processImage({
     required Uint8List imageBytes,
     required String cacheKey,
-    double intensity = 1.0,
     int? outputScale,
     String? label,
   }) async {
@@ -202,9 +203,9 @@ class Anime4KV4Service {
     final maxEdge =
         (appdata.settings['anime4KV4MaxEdge'] as num?)?.toInt() ?? 1600;
 
-    // 缓存键含模型 id + 有效输出倍数 + 长边上限 + intensity，避免串图
+    // 缓存键含模型 id + 有效输出倍数 + 长边上限，避免串图
     final fullKey =
-        'v4_${def.id}_s${effScale}_e${maxEdge}_${cacheKey}_${intensity.toStringAsFixed(2)}';
+        'v4_${def.id}_s${effScale}_e${maxEdge}_$cacheKey';
 
     final tracker = UpscaleStatusTracker.instance;
     final showLabel = label ?? cacheKey;
@@ -231,18 +232,18 @@ class Anime4KV4Service {
 
         Uint8List? result;
         if (App.isAndroid) {
-          result = await _upscaleOnNative(
-              imageBytes, modelPath, intensity, true);
+          // Android 原生无长边跳过策略，先在 Dart 侧做同样的尺寸检查
+          _checkSkip(imageBytes, maxEdge);
+          result = await _upscaleOnNative(imageBytes, modelPath, true);
           // NNAPI 失败（不支持/崩溃）时回退纯 CPU 重试一次
-          result ??= await _upscaleOnNative(
-              imageBytes, modelPath, intensity, false);
+          result ??= await _upscaleOnNative(imageBytes, modelPath, false);
           // Android 原生输出固定为原生倍数，倍数细调在此后处理
           if (result != null && effScale < def.scale) {
             result = await resizePngIsolate(result, effScale / def.scale);
           }
         } else {
-          result = await _upscaleOnDesktop(imageBytes, modelPath, intensity,
-              maxEdge, def, effScale, fullKey);
+          result = await _upscaleOnDesktop(
+              imageBytes, modelPath, maxEdge, def, effScale, fullKey);
         }
 
         if (result != null) {
@@ -265,7 +266,7 @@ class Anime4KV4Service {
   /// 桌面端：常驻 worker isolate 中分块推理。
   /// worker 崩溃/超时则重建一次重试，仍失败返回 null（reader 回退 v1/原图）。
   Future<Uint8List?> _upscaleOnDesktop(Uint8List imageBytes,
-      String modelPath, double intensity, int maxEdge, UpscaleModelDef def,
+      String modelPath, int maxEdge, UpscaleModelDef def,
       int effScale, String trackerKey) async {
     for (int attempt = 0; attempt < 2; attempt++) {
       OrtUpscaleWorker? worker = _worker;
@@ -280,7 +281,6 @@ class Anime4KV4Service {
             modelPath: modelPath,
             model: def,
             maxInputEdge: maxEdge,
-            intensity: intensity,
             outputScale: effScale,
           ),
           onProgress: (p) {
@@ -359,6 +359,18 @@ class Anime4KV4Service {
     } catch (e) {
       return 0;
     }
+  }
+}
+
+/// 轻量检查图片长边是否超过上限（对齐 localManga 的 skipped 策略）。
+/// Android 原生路径没有内置该策略，在提交任务前检查。
+void _checkSkip(Uint8List imageBytes, int maxEdge) {
+  if (maxEdge <= 0) return;
+  final src = img.decodeImage(imageBytes);
+  if (src == null) return;
+  if (math.max(src.width, src.height) > maxEdge) {
+    throw UpscaleSkippedException(
+        '原图边长 ${math.max(src.width, src.height)}px 超过上限 ${maxEdge}px');
   }
 }
 

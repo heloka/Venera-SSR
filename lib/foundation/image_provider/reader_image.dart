@@ -148,10 +148,6 @@ class ReaderImageProvider
           final result = await Anime4KV4Service.instance.processImage(
             imageBytes: bytes,
             cacheKey: key,
-            intensity: (appdata.settings.getReaderSetting(
-                      cid, sourceKey ?? "", 'anime4KV4Intensity') as num?)
-                    ?.toDouble() ??
-                1.0,
             outputScale: ((appdata.settings.getReaderSetting(
                           cid, sourceKey ?? "", 'anime4KV4Scale') as num?)
                         ?.toInt()) ??
