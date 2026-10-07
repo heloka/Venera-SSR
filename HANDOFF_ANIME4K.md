@@ -305,3 +305,12 @@ curl -s https://api.github.com/repos/heloka/Venera-SSR/actions/runs?per_page=5
   `97faaceb55fef0edac23b64dc270747a1fbadaeccdb7870230e93da9f63cd4b2`。
   已安装到 `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-diagnostic-e0bda49-windows`，
   未启动；要验证时应使用该目录中的 `venera.exe`，不要再用前两版 v2.1.6。
+
+### 阅读器双页与工具栏修正（2026-10-07）
+
+- `348e3d8` 加入阅读器横向画廊双页按钮；按钮按当前方向切换每屏 1/2 张，并保留每屏 1–5 张的
+  高级设置。阅读器控件在点击后显示 5 秒；操作会重置计时，随后与页码进度栏一起淡出。
+  超分开关、对比、设置和任务状态已移到底栏，不再覆盖页面进度。
+- `4748915` 修正双页设置的保存调用。该提交已通过 Flutter 分析、测试、Windows Release 构建和
+  Real-CUGAN 运行时打包。[CI 记录](https://github.com/heloka/Venera-SSR/actions/runs/37626803727)。
+  产物为 `Venera-Windows-v2.1.6.zip`（artifact `11484853015`）。
