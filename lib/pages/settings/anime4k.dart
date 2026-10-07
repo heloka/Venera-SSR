@@ -59,6 +59,18 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   int get _maxEdge =>
       (appdata.settings['anime4KV4MaxEdge'] as num?)?.toInt() ?? 1600;
 
+  int get _rawScale =>
+      (appdata.settings['anime4KV4Scale'] as num?)?.toInt() ?? 0;
+
+  void _setScale(int scale) {
+    if (_rawScale == scale) return;
+    appdata.settings['anime4KV4Scale'] = scale;
+    appdata.saveData();
+    PaintingBinding.instance.imageCache.clear();
+    ComicImage.clear();
+    setState(() {});
+  }
+
   void _setVersion(String v) {
     if (_version == v) return;
     appdata.settings['anime4KVersion'] = v;
@@ -375,6 +387,44 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                   color: context.colorScheme.onSurfaceVariant,
                   fontSize: 12,
                 ),
+              ),
+            ),
+          ),
+        // v4 输出倍数细调（高于原生不支持；4x 模型可 3x/2x 推理后缩小）
+        if (isV4)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Text(
+                "Output Scale".tl,
+                style: TextStyle(
+                  color: context.colorScheme.primary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        if (isV4)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: Anime4KV4ModelManager.selectedDef
+                    .supportedOutputScales
+                    .map((s) => ChoiceChip(
+                          label: Text(s == Anime4KV4ModelManager.selectedDef.scale
+                              ? "$s× (${'Native'.tl})"
+                              : "$s× (${'Downscaled'.tl})"),
+                          selected:
+                              resolveOutputScale(
+                                  Anime4KV4ModelManager.selectedDef,
+                                  _rawScale) ==
+                              s,
+                          onSelected: (_) => _setScale(s),
+                        ))
+                    .toList(),
               ),
             ),
           ),

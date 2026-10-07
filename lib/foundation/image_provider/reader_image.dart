@@ -16,7 +16,11 @@ import 'package:venera/utils/colorization/colorization_service.dart';
 class ReaderImageProvider
     extends BaseImageProvider<image_provider.ReaderImageProvider> {
   /// Image provider for normal image.
-  const ReaderImageProvider(this.imageKey, this.sourceKey, this.cid, this.eid, this.page);
+  ///
+  /// [compareOriginal] 为 true 时跳过超分/上色等 AI 处理，直接展示原图
+  /// （阅读器"对比原图"开关用；key 含标记，两种变体在 imageCache 中共存实现秒切）。
+  const ReaderImageProvider(this.imageKey, this.sourceKey, this.cid, this.eid, this.page,
+      {this.compareOriginal = false});
 
   final String imageKey;
 
@@ -27,6 +31,8 @@ class ReaderImageProvider
   final String eid;
 
   final int page;
+
+  final bool compareOriginal;
 
   @override
   Future<Uint8List> load(chunkEvents, checkStop) async {
@@ -60,6 +66,10 @@ class ReaderImageProvider
     }
     // 自此 imageBytes 非 null，用 final 捕获以便下方闭包/赋值使用
     var bytes = imageBytes;
+    if (compareOriginal) {
+      // "对比原图"模式：跳过全部 AI 处理，直接返回原始字节
+      return bytes;
+    }
     if (appdata.settings['enableCustomImageProcessing']) {
       var script = appdata.settings['customImageProcessing'].toString();
       if (!script.contains('function processImage')) {
@@ -142,6 +152,11 @@ class ReaderImageProvider
                       cid, sourceKey ?? "", 'anime4KV4Intensity') as num?)
                     ?.toDouble() ??
                 1.0,
+            outputScale: ((appdata.settings.getReaderSetting(
+                          cid, sourceKey ?? "", 'anime4KV4Scale') as num?)
+                        ?.toInt()) ??
+                0,
+            label: '第 $page 页',
           );
           if (result != null) {
             bytes = result;
@@ -154,6 +169,7 @@ class ReaderImageProvider
           final result = await Anime4KService.instance.processImage(
             imageBytes: bytes,
             cacheKey: key,
+            label: '第 $page 页',
             scaleFactor: (appdata.settings.getReaderSetting(
                       cid, sourceKey ?? "", 'anime4KScaleFactor') as num?)
                   ?.toDouble() ??
@@ -212,7 +228,8 @@ class ReaderImageProvider
   }
 
   @override
-  String get key => "$imageKey@$sourceKey@$cid@$eid";
+  String get key =>
+      "$imageKey@$sourceKey@$cid@$eid${compareOriginal ? "|raw" : ""}";
 
   @override
   bool get enableResize => false;

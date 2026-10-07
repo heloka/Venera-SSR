@@ -157,6 +157,12 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           right: 0,
           child: buildBottom(),
         ),
+        if (!isOnChapterCommentsPage)
+          const Positioned(
+            left: 16,
+            bottom: 44,
+            child: _UpscaleStatusPill(),
+          ),
       ],
     );
   }
@@ -223,6 +229,13 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
                     onPressed: openChapterComments,
                   ),
                 ),
+              Tooltip(
+                message: "AI Upscale".tl,
+                child: IconButton(
+                  icon: const Icon(Icons.auto_awesome),
+                  onPressed: () => _showUpscaleQuickPanel(context),
+                ),
+              ),
               Tooltip(
                 message: "Settings".tl,
                 child: IconButton(

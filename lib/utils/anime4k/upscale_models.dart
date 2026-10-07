@@ -65,6 +65,19 @@ class UpscaleModelDef {
     required this.defaultUrls,
     this.sha256,
   });
+
+  /// 支持的输出倍数（细调）：原生倍数优先，>2 的模型可由输出缩小得到更低倍数
+  /// （参考 localManga 的 output_scales：如 animevideov3 4× 推理后缩小为 3×/2×）。
+  List<int> get supportedOutputScales =>
+      scale >= 4 ? const [4, 3, 2] : [scale];
+}
+
+/// 把用户选择的输出倍数解析为有效值：0/非法值回退到模型原生倍数。
+int resolveOutputScale(UpscaleModelDef def, int raw) {
+  if (raw > 0 && def.supportedOutputScales.contains(raw)) {
+    return raw;
+  }
+  return def.scale;
 }
 
 class UpscaleModels {

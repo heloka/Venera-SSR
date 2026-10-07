@@ -216,4 +216,32 @@ void main() {
       expect(() => computeTilePlan(100, 100, 256, 200), throwsArgumentError);
     });
   });
+
+  group('output scale fine-tuning', () {
+    test('native scale models expose a single output scale', () {
+      final acnet = UpscaleModels.byId('anime4k_acnet');
+      expect(acnet.supportedOutputScales, [2]);
+      final cunet = UpscaleModels.byId('waifu2x_cunet_x2');
+      expect(cunet.supportedOutputScales, [2]);
+    });
+
+    test('4x models expose derived 3x/2x scales', () {
+      final video = UpscaleModels.byId('anime4k_x4');
+      expect(video.scale, 4);
+      expect(video.supportedOutputScales, [4, 3, 2]);
+      final general = UpscaleModels.byId('general_x4v3');
+      expect(general.supportedOutputScales, [4, 3, 2]);
+    });
+
+    test('resolveOutputScale falls back to native for invalid values', () {
+      final video = UpscaleModels.byId('anime4k_x4');
+      expect(resolveOutputScale(video, 0), 4);
+      expect(resolveOutputScale(video, 5), 4);
+      expect(resolveOutputScale(video, 2), 2);
+      expect(resolveOutputScale(video, 3), 3);
+      final acnet = UpscaleModels.byId('anime4k_acnet');
+      expect(resolveOutputScale(acnet, 0), 2);
+      expect(resolveOutputScale(acnet, 4), 2);
+    });
+  });
 }

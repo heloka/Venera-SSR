@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:venera/foundation/app.dart';
@@ -11,6 +13,8 @@ import 'package:venera/foundation/log.dart';
 import 'anime4k_v4_model_manager.dart';
 import 'ort_upscale_core.dart';
 import 'ort_upscale_worker.dart';
+import 'upscale_models.dart' show resolveOutputScale;
+import 'upscale_status_tracker.dart';
 
 /// Anime4K v4 超分服务（带模型版本）
 ///
@@ -169,13 +173,17 @@ class Anime4KV4Service {
   /// Android 为原生会话；桌面为 worker isolate 中的会话。
   Future<void> resetNativeSession() => _resetBackendSession();
 
-  /// 处理图片字节数据，返回超分后的 PNG 字节数据（倍数由模型决定，2x/4x）。
+  /// 处理图片字节数据，返回超分后的 PNG 字节数据（倍数由模型与 [outputScale] 决定）。
   ///
   /// 模型缺失或平台无推理后端时返回 null（上层据此回退 v1 或保持原图）。
+  /// [outputScale] 为倍数细调：低于模型原生倍数时推理后缩小；null = 原生。
+  /// [label] 为任务状态展示标签（如 "第 3 页"）。
   Future<Uint8List?> processImage({
     required Uint8List imageBytes,
     required String cacheKey,
     double intensity = 1.0,
+    int? outputScale,
+    String? label,
   }) async {
     if (!(App.isAndroid || _ortSupported)) {
       return null;
@@ -189,12 +197,17 @@ class Anime4KV4Service {
     final modelPath = _modelPath;
     if (modelPath == null) return null;
 
+    final def = Anime4KV4ModelManager.selectedDef;
+    final effScale = resolveOutputScale(def, outputScale ?? 0);
     final maxEdge =
         (appdata.settings['anime4KV4MaxEdge'] as num?)?.toInt() ?? 1600;
 
-    // 缓存键含模型 id（倍数不同）+ 长边上限（输出尺寸不同）+ intensity，避免串图
+    // 缓存键含模型 id + 有效输出倍数 + 长边上限 + intensity，避免串图
     final fullKey =
-        'v4_${Anime4KV4ModelManager.selectedDef.id}_e${maxEdge}_${cacheKey}_${intensity.toStringAsFixed(2)}';
+        'v4_${def.id}_s${effScale}_e${maxEdge}_${cacheKey}_${intensity.toStringAsFixed(2)}';
+
+    final tracker = UpscaleStatusTracker.instance;
+    final showLabel = label ?? cacheKey;
 
     final cached = await _getFromCache(fullKey);
     if (cached != null) {
@@ -208,11 +221,13 @@ class Anime4KV4Service {
     }
 
     _processingKeys.add(fullKey);
+    tracker.enqueue(fullKey, showLabel, def.id);
 
     return _enqueueTask(() async {
       try {
         Log.info('Anime4KV4',
-            'processing image $cacheKey (${Anime4KV4ModelManager.selectedDef.id}, maxEdge=$maxEdge)');
+            'processing image $cacheKey (${def.id}, scale=$effScale, maxEdge=$maxEdge)');
+        tracker.start(fullKey);
 
         Uint8List? result;
         if (App.isAndroid) {
@@ -221,18 +236,25 @@ class Anime4KV4Service {
           // NNAPI 失败（不支持/崩溃）时回退纯 CPU 重试一次
           result ??= await _upscaleOnNative(
               imageBytes, modelPath, intensity, false);
+          // Android 原生输出固定为原生倍数，倍数细调在此后处理
+          if (result != null && effScale < def.scale) {
+            result = await resizePngIsolate(result, effScale / def.scale);
+          }
         } else {
           result = await _upscaleOnDesktop(imageBytes, modelPath, intensity,
-              maxEdge, Anime4KV4ModelManager.selectedDef);
+              maxEdge, def, effScale, fullKey);
         }
 
         if (result != null) {
           await _saveToCache(fullKey, result);
           Log.info('Anime4KV4', 'processing complete for $cacheKey');
         }
+        tracker.finish(fullKey, success: result != null,
+            error: result == null ? '处理失败' : null);
         return result;
       } catch (e, s) {
         Log.error('Anime4KV4', 'processing error: $e\n$s');
+        tracker.finish(fullKey, success: false, error: '$e');
         return null;
       } finally {
         _processingKeys.remove(fullKey);
@@ -243,7 +265,8 @@ class Anime4KV4Service {
   /// 桌面端：常驻 worker isolate 中分块推理。
   /// worker 崩溃/超时则重建一次重试，仍失败返回 null（reader 回退 v1/原图）。
   Future<Uint8List?> _upscaleOnDesktop(Uint8List imageBytes,
-      String modelPath, double intensity, int maxEdge, UpscaleModelDef def) async {
+      String modelPath, double intensity, int maxEdge, UpscaleModelDef def,
+      int effScale, String trackerKey) async {
     for (int attempt = 0; attempt < 2; attempt++) {
       OrtUpscaleWorker? worker = _worker;
       try {
@@ -258,8 +281,10 @@ class Anime4KV4Service {
             model: def,
             maxInputEdge: maxEdge,
             intensity: intensity,
+            outputScale: effScale,
           ),
           onProgress: (p) {
+            UpscaleStatusTracker.instance.progress(trackerKey, p);
             if (p == 0 || (p * 100).round() % 25 == 0) {
               Log.info('Anime4KV4',
                   'progress ${(p * 100).toStringAsFixed(0)}%');
@@ -334,5 +359,27 @@ class Anime4KV4Service {
     } catch (e) {
       return 0;
     }
+  }
+}
+
+/// 在 isolate 中把 PNG 字节按 [factor] 等比缩小（Android 原生输出后的倍数细调）。
+Future<Uint8List?> resizePngIsolate(Uint8List pngBytes, double factor) async {
+  return Isolate.run(() => _resizePngSync(pngBytes, factor));
+}
+
+Uint8List? _resizePngSync(Uint8List pngBytes, double factor) {
+  try {
+    final src = img.decodeImage(pngBytes);
+    if (src == null) return null;
+    final resized = img.copyResize(
+      src,
+      width: (src.width * factor).round(),
+      height: (src.height * factor).round(),
+      interpolation: img.Interpolation.cubic,
+    );
+    return Uint8List.fromList(img.encodePng(resized));
+  } catch (e) {
+    Log.error('Anime4KV4', 'resize failed: $e');
+    return null;
   }
 }

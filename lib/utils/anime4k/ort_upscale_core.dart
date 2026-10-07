@@ -29,12 +29,17 @@ class OrtUpscaleRequest {
   /// 对比强度（围绕 0.5 缩放），1.0 = 不变，与 Android 原生 v4 语义一致。
   final double intensity;
 
+  /// 输出倍数（倍数细调）：低于 [UpscaleModelDef.scale] 时把推理结果等比缩小；
+  /// null/大于等于原生倍数时保持原生输出。
+  final int? outputScale;
+
   const OrtUpscaleRequest({
     required this.imageBytes,
     required this.modelPath,
     required this.model,
     this.maxInputEdge = 1600,
     this.intensity = 1.0,
+    this.outputScale,
   });
 }
 
@@ -243,7 +248,21 @@ Uint8List runOrtUpscale(
     }
   }
 
-  return Uint8List.fromList(img.encodePng(out));
+  // 倍数细调：请求倍数低于原生倍数时，把推理输出等比缩小
+  final requestedScale = request.outputScale;
+  img.Image finalImage = out;
+  if (requestedScale != null &&
+      requestedScale > 0 &&
+      requestedScale < scale) {
+    finalImage = img.copyResize(
+      out,
+      width: (w * requestedScale).round(),
+      height: (h * requestedScale).round(),
+      interpolation: img.Interpolation.cubic,
+    );
+  }
+
+  return Uint8List.fromList(img.encodePng(finalImage));
 }
 
 double _unit(double v) => v < 0 ? 0 : (v > 1 ? 1 : v);

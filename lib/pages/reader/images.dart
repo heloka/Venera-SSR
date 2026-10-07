@@ -1214,6 +1214,7 @@ ImageProvider _createImageProviderFromKey(
     reader.cid,
     reader.eid,
     reader.page,
+    compareOriginal: _upscaleShowOriginal.value,
   );
 }
 

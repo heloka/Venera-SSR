@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 
 import 'anime4k_upscaler.dart';
+import 'upscale_status_tracker.dart';
 
 /// Anime4K 超分服务
 ///
@@ -99,12 +100,14 @@ class Anime4KService {
   /// [scaleFactor] 放大倍数（默认 2.0）
   /// [pushStrength] 线条细化强度（默认 0.31）
   /// [pushGradStrength] 梯度精炼强度（默认 1.0）
+  /// [label] 任务状态展示标签（如 "第 3 页"）
   Future<Uint8List?> processImage({
     required Uint8List imageBytes,
     required String cacheKey,
     double scaleFactor = 2.0,
     double pushStrength = 0.31,
     double pushGradStrength = 1.0,
+    String? label,
   }) async {
     // 生成唯一缓存键（包含参数信息）
     final fullKey =
@@ -124,11 +127,14 @@ class Anime4KService {
     }
 
     _processingKeys.add(fullKey);
+    final tracker = UpscaleStatusTracker.instance;
+    tracker.enqueue(fullKey, label ?? cacheKey, 'v1');
 
     return _enqueueTask(() async {
       try {
         Log.info('Anime4K', 'processing image $cacheKey, '
             'scale: $scaleFactor, push: $pushStrength, grad: $pushGradStrength');
+        tracker.start(fullKey);
 
         final params = Anime4KParams(
           imageBytes: imageBytes,
@@ -145,9 +151,12 @@ class Anime4KService {
           Log.info('Anime4K', 'processing complete for $cacheKey');
         }
 
+        tracker.finish(fullKey, success: result != null,
+            error: result == null ? '处理失败' : null);
         return result;
       } catch (e) {
         Log.error('Anime4K', 'Anime4K processing error: $e');
+        tracker.finish(fullKey, success: false, error: '$e');
         return null;
       } finally {
         _processingKeys.remove(fullKey);

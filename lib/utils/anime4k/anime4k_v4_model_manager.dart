@@ -10,7 +10,8 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/anime4k/upscale_models.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 
-export 'upscale_models.dart' show UpscaleModelDef, UpscaleModels;
+export 'upscale_models.dart'
+    show UpscaleModelDef, UpscaleModels, resolveOutputScale;
 
 /// v4 超分模型管理器：管理 v4 AI 超分 ONNX 模型的生命周期。
 ///
