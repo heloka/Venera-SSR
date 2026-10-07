@@ -6,7 +6,7 @@ part of 'reader.dart';
 /// 原图/超分图两种变体共存），因此切换可以在已看过的页面上瞬时完成。
 final ValueNotifier<bool> _upscaleShowOriginal = ValueNotifier(false);
 
-/// 打开超分任务面板（左下角状态胶囊入口）：
+/// 打开超分任务面板（工具栏状态胶囊入口）：
 /// 各页排队/处理/完成状态 + 当前页原图对比开关。
 void _showUpscaleJobsPanel(BuildContext context) {
   showSideBar(context, const _UpscaleJobsPanel(), width: 400);
@@ -26,8 +26,7 @@ class _WindowsUpscaleControls extends StatelessWidget {
     final comicId = reader.cid;
     final sourceKey = reader.type.sourceKey;
     return Material(
-      color: context.colorScheme.surface.toOpacity(0.92),
-      borderRadius: BorderRadius.circular(22),
+      color: Colors.transparent,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

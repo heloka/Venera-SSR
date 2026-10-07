@@ -286,7 +286,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           visible: appdata.settings['readerMode']!.startsWith('gallery'),
           child: _SliderSetting(
             title:
-                "The number of pic in screen for landscape (Only Gallery Mode)"
+                "Images per screen in landscape (set to 2 for double-page mode)"
                     .tl,
             settingsIndex: "readerScreenPicNumberForLandscape",
             interval: 1,
@@ -304,7 +304,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           visible: appdata.settings['readerMode']!.startsWith('gallery'),
           child: _SliderSetting(
             title:
-                "The number of pic in screen for portrait (Only Gallery Mode)"
+                "Images per screen in portrait (set to 2 for double-page mode)"
                     .tl,
             settingsIndex: "readerScreenPicNumberForPortrait",
             interval: 1,

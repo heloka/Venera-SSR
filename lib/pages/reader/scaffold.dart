@@ -14,7 +14,11 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
   static const kTopBarHeight = 56.0;
 
-  static const kBottomBarHeight = 105.0;
+  double get kBottomBarHeight => context.reader.isOnChapterCommentsPage
+      ? 105.0
+      : 153.0;
+
+  Timer? _controlsHideTimer;
 
   bool get isOpen => _isOpen;
 
@@ -99,12 +103,18 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
   @override
   void dispose() {
+    _controlsHideTimer?.cancel();
     sliderFocus.dispose();
     super.dispose();
   }
 
   void openOrClose() {
-    if (!_isOpen) {
+    _setControlsOpen(!_isOpen);
+  }
+
+  void _setControlsOpen(bool open) {
+    if (_isOpen == open) return;
+    if (open) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     } else {
       if (!appdata.settings['showSystemStatusBar']) {
@@ -114,7 +124,18 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       }
     }
     setState(() {
-      _isOpen = !_isOpen;
+      _isOpen = open;
+    });
+    _controlsHideTimer?.cancel();
+    if (open) {
+      _scheduleControlsHide();
+    }
+  }
+
+  void _scheduleControlsHide() {
+    _controlsHideTimer?.cancel();
+    _controlsHideTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) _setControlsOpen(false);
     });
   }
 
@@ -127,45 +148,56 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   @override
   Widget build(BuildContext context) {
     final isOnChapterCommentsPage = context.reader.isOnChapterCommentsPage;
-    return Stack(
-      children: [
-        Positioned.fill(child: widget.child),
-        if (appdata.settings['showPageNumberInReader'] == true &&
-            !isOnChapterCommentsPage)
-          buildPageInfoText(),
-        if (!isOnChapterCommentsPage) buildStatusInfo(),
-        AnimatedPositioned(
-          duration: const Duration(milliseconds: 180),
-          right: 16,
-          bottom: showFloatingButtonValue == 0 ? -58 : 36,
-          child: buildEpChangeButton(),
-        ),
-        AnimatedPositioned(
-          duration: const Duration(milliseconds: 180),
-          top: _isOpen ? 0 : -(kTopBarHeight + context.padding.top),
-          left: 0,
-          right: 0,
-          height: kTopBarHeight + context.padding.top,
-          child: buildTop(),
-        ),
-        AnimatedPositioned(
-          duration: const Duration(milliseconds: 180),
-          bottom: _isOpen
-              ? 0
-              : -(kBottomBarHeight + MediaQuery.of(context).padding.bottom),
-          left: 0,
-          right: 0,
-          child: buildBottom(),
-        ),
-        if (!isOnChapterCommentsPage && App.isWindows)
-          Positioned(
-            left: 16,
-            bottom: 44,
-            child: const _WindowsUpscaleControls(),
+    return Listener(
+      onPointerDown: (_) {
+        if (_isOpen) _scheduleControlsHide();
+      },
+      child: Stack(
+        children: [
+          Positioned.fill(child: widget.child),
+          if (appdata.settings['showPageNumberInReader'] == true &&
+              !isOnChapterCommentsPage)
+            buildPageInfoText(),
+          if (!isOnChapterCommentsPage) buildStatusInfo(),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 180),
+            right: 16,
+            bottom: showFloatingButtonValue == 0 ? -58 : 36,
+            child: buildEpChangeButton(),
           ),
-        if (!isOnChapterCommentsPage && !App.isWindows)
-          const Positioned(left: 16, bottom: 44, child: _UpscaleStatusPill()),
-      ],
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 220),
+            top: _isOpen ? 0 : -(kTopBarHeight + context.padding.top),
+            left: 0,
+            right: 0,
+            height: kTopBarHeight + context.padding.top,
+            child: IgnorePointer(
+              ignoring: !_isOpen,
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 260),
+                opacity: _isOpen ? 1 : 0,
+                child: buildTop(),
+              ),
+            ),
+          ),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 220),
+            bottom: _isOpen
+                ? 0
+                : -(kBottomBarHeight + MediaQuery.of(context).padding.bottom),
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              ignoring: !_isOpen,
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 260),
+                opacity: _isOpen ? 1 : 0,
+                child: buildBottom(),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -405,6 +437,20 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           onPressed: addImageFavorite,
         ),
       ),
+      if (context.reader.mode == ReaderMode.galleryLeftToRight ||
+          context.reader.mode == ReaderMode.galleryRightToLeft)
+        Tooltip(
+          message: context.reader.imagesPerPage > 1
+              ? "Turn off double-page mode".tl
+              : "Turn on double-page mode".tl,
+          child: IconButton(
+            color: context.reader.imagesPerPage > 1
+                ? context.colorScheme.primary
+                : null,
+            icon: const Icon(Icons.auto_stories),
+            onPressed: toggleDoublePageMode,
+          ),
+        ),
       if (App.isDesktop)
         Tooltip(
           message: "${"Full Screen".tl}(F12)",
@@ -522,6 +568,19 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
               const SizedBox(width: 8),
             ],
           ),
+          if (!context.reader.isOnChapterCommentsPage)
+            SizedBox(
+              height: 48,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: App.isWindows
+                      ? const _WindowsUpscaleControls()
+                      : const _UpscaleStatusPill(),
+                ),
+              ),
+            ),
           LayoutBuilder(
             builder: (context, constrains) {
               final small = (constrains.maxWidth - buttons.length * 50) < 120;
@@ -577,6 +636,31 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
         ),
       ),
     );
+  }
+
+  void toggleDoublePageMode() async {
+    final reader = context.reader;
+    final settingKey = reader.isPortrait
+        ? 'readerScreenPicNumberForPortrait'
+        : 'readerScreenPicNumberForLandscape';
+    final pageCount = reader.imagesPerPage > 1 ? 1 : 2;
+    if (appdata.settings.isComicSpecificSettingsEnabled(
+      reader.cid,
+      reader.type.sourceKey,
+    )) {
+      appdata.settings.setReaderSetting(
+        reader.cid,
+        reader.type.sourceKey,
+        settingKey,
+        pageCount,
+      );
+    } else {
+      appdata.settings[settingKey] = pageCount;
+    }
+    await appdata.settings.saveData();
+    if (!mounted) return;
+    reader.update();
+    update();
   }
 
   var sliderFocus = FocusNode();
