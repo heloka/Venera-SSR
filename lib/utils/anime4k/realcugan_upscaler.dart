@@ -674,22 +674,30 @@ class RealCuganUpscaler {
         throw _UpscaleException(_explainFailure(diagnostic, config.gpuId));
       }
       final outputBytes = await outputFile.readAsBytes();
-      final enhanced = img.decodeImage(outputBytes);
-      if (enhanced == null ||
-          enhanced.width != original.width * config.scale ||
-          enhanced.height != original.height * config.scale) {
+      final outputWidth = original.width * config.scale;
+      final outputHeight = original.height * config.scale;
+      if (!_hasPngDimensions(outputBytes, outputWidth, outputHeight)) {
         throw const _UpscaleException('Real-CUGAN 输出尺寸不正确。');
       }
-      final resultImage = _composeOutput(original, enhanced, config.mixRatio);
-      final encoded = Uint8List.fromList(img.encodePng(resultImage, level: 3));
+      final Uint8List encoded;
+      if (config.mixRatio == 100 && !original.hasAlpha) {
+        encoded = outputBytes;
+      } else {
+        final enhanced = img.decodeImage(outputBytes);
+        if (enhanced == null) {
+          throw const _UpscaleException('Real-CUGAN 输出图片损坏。');
+        }
+        final resultImage = _composeOutput(original, enhanced, config.mixRatio);
+        encoded = Uint8List.fromList(img.encodePng(resultImage, level: 3));
+      }
       tracker.setDetails(
         requestId,
         backendName: _extractDevice(diagnostic).isEmpty
             ? 'Vulkan GPU ${config.gpuId}'
             : _extractDevice(diagnostic),
         elapsed: stopwatch.elapsed,
-        outputWidth: resultImage.width,
-        outputHeight: resultImage.height,
+        outputWidth: outputWidth,
+        outputHeight: outputHeight,
       );
       tracker.finish(requestId);
       return encoded;
@@ -747,6 +755,25 @@ class RealCuganUpscaler {
       }
     }
     return output;
+  }
+
+  static bool _hasPngDimensions(
+    Uint8List bytes,
+    int expectedWidth,
+    int expectedHeight,
+  ) {
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    if (bytes.length < 24) return false;
+    for (var index = 0; index < signature.length; index++) {
+      if (bytes[index] != signature[index]) return false;
+    }
+    int readBigEndian32(int offset) =>
+        (bytes[offset] << 24) |
+        (bytes[offset + 1] << 16) |
+        (bytes[offset + 2] << 8) |
+        bytes[offset + 3];
+    return readBigEndian32(16) == expectedWidth &&
+        readBigEndian32(20) == expectedHeight;
   }
 
   Future<ProcessResult> _runProcess(
