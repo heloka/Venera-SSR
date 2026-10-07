@@ -385,8 +385,9 @@ class RealCuganUpscaler {
       }
       if (manifest is! Map ||
           manifest['version'] != _bundleVersion ||
-          manifest['sha256'] != _bundleSha256)
+          manifest['sha256'] != _bundleSha256) {
         continue;
+      }
       final required = [
         'realcugan-ncnn-vulkan.exe',
         'vcomp140.dll',

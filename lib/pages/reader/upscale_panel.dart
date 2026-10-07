@@ -332,7 +332,7 @@ class _UpscaleStatusPill extends StatelessWidget {
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          "Failed".tl + " $failed",
+                          "${'Failed'.tl} $failed",
                           style: const TextStyle(fontSize: 12),
                         ),
                       ],

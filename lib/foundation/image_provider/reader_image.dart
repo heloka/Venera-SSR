@@ -182,7 +182,6 @@ class ReaderImageProvider
         Log.error('ReaderImage', 'Real-CUGAN GPU 超分失败：$e', s);
       }
     }
-    }
     if (enableAnime4K && !App.isWindows && !compareOriginal) {
       if (anime4KVersion == 'v4' && Anime4KV4Service.instance.isAvailable) {
         try {
