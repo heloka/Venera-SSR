@@ -1,0 +1,218 @@
+# 交接文档：Venera-SSR AI 超分功能改造（2026-10-07）
+
+> 写给下一个接手的 AI / 开发者。本文档自包含：背景、全部改动、架构、关键坑、
+> 验证方法、当前状态与未完成事项。读完本文即可继续开发，无需考古聊天记录。
+
+---
+
+## 0. 一句话背景
+
+Venera-SSR（Flutter 漫画阅读器）原有的「v4 AI 超分」仅 Android 可用
+（Kotlin + ONNX Runtime + NNAPI），用户在 Windows 上开启后表现为"超分失败"。
+本次改造：为桌面端（Windows/Linux/macOS）实现跨平台 ONNX 超分引擎，
+并对齐用户自己的参考项目 **localManga**（`D:\04_Work_Learning\Projects\Vibe\localManga`，
+Web 前端 + Python 后端，`server/upscale/` 是超分引擎）的推理行为与交互。
+
+**用户对效果的最终验收标准：与 localManga 里的超分效果一致。**
+
+- 用户的 fork（构建与发布在这里）：https://github.com/heloka/Venera-SSR
+- 上游原仓库：https://github.com/Kiastr/Venera-SSR
+- 本地仓库：`D:\04_Work_Learning\Projects\Venera-SSR`（remote `origin`=上游，
+  remote `fork`=用户的 fork；分支 main）
+
+## 1. 三轮改动概览（按时间序）
+
+| 轮次 | commit | 内容 |
+|---|---|---|
+| 1 | `3d7563d` | 桌面端 ONNX 超分引擎（onnxruntime Dart FFI 插件）+ 模型注册表 + 下载管理 + 设置页；修复 CI Flutter 版本不匹配；Android so 冲突 pickFirst |
+| 2 | `c2ddeae` | 阅读器实时超分面板/对比原图/左下角状态胶囊/任务面板/输出倍数细调 |
+| 3 | `67b598f`（当前 HEAD） | **引擎行为对齐 localManga**：超长边页跳过保持原图、默认模型 animevideov3 输出 2×、分块方案改为核心512+重叠16+补偶数、删 intensity、删阅读器✨按钮与快捷面板（对比开关移入任务面板）、模型集收窄 |
+
+第 3 轮是用户反馈"效果完全不如 localManga"后的重构，**根因**有二：
+- 旧引擎对超长边页面做"缩小到上限再超分"，localManga 是**跳过保持原图**（skipped 策略）——
+  缩小再放大是大页面变模糊的主因；
+- 旧默认模型是较弱的 ACNet，localManga 默认 `realesr-animevideov3` 输出 2×。
+
+## 2. 当前架构与文件清单
+
+```
+lib/utils/anime4k/
+├── upscale_models.dart          # 模型注册表（纯 Dart，无 Flutter 依赖）
+├── ort_upscale_core.dart        # 分块推理核心（纯 Dart）：tile/跳过/倍数细调/alpha
+├── ort_upscale_worker.dart      # 常驻 isolate：会话只加载一次、进度/跳过/错误消息协议
+├── upscale_status_tracker.dart  # 任务状态追踪（ChangeNotifier 单例）：排队/处理/完成/跳过/失败
+├── anime4k_v4_service.dart      # v4 服务：缓存+队列+平台路由（Android原生 / 桌面worker）
+├── anime4k_v4_model_manager.dart# 模型生命周期：内置抽取/下载(镜像+sha256)/自选模型
+├── anime4k_service.dart         # v1 纯 Dart CPU 算法（旧有，未动；接入了状态追踪）
+└── anime4k_upscaler.dart        # v1 算法实现（旧有，未动）
+
+lib/pages/reader/
+├── upscale_panel.dart           # part of reader.dart：左下角状态胶囊 + 任务面板 + 对比原图开关
+├── scaffold.dart                # Stack 里挂了 _UpscaleStatusPill（left:16, bottom:44）
+├── images.dart                  # _createImageProviderFromKey 传 compareOriginal
+└── comic_image.dart             # 旧有 ComicImage（imageCache 清理/重载入口 ComicImage.clear()）
+
+lib/foundation/image_provider/reader_image.dart  # 处理管线入口：AI处理在 ImageProvider.load 内
+lib/pages/settings/anime4k.dart                  # 超分完整设置页（part of settings_page.dart）
+doc/anime4k_v4_upscale.md                        # 引擎技术文档（含关键坑）
+```
+
+### 数据流（桌面端）
+
+```
+ReaderImageProvider.load()
+  ├─ compareOriginal=true → 直接返回原始字节（跳过全部 AI 处理）
+  ├─ v4 且 Anime4KV4Service.isAvailable
+  │    → Anime4KV4Service.processImage(cacheKey, outputScale, label:'第 N 页')
+  │        → 缓存命中直接返回
+  │        → 入队（maxConcurrent=2）→ tracker.enqueue/start
+  │        → Android: MethodChannel colorize/esrgan（原生 NNAPI→CPU 回退）
+  │             超过 maxEdge 先 _checkSkip 抛 UpscaleSkippedException
+  │        → 桌面: OrtUpscaleWorker.run（常驻 isolate，core 512+重叠16+补偶）
+  │             长边超限 → worker 回 skipped 事件 → tracker「已跳过」→ 返回 null（显示原图）
+  │        → outputScale < 原生倍数时缩小（桌面在编码前 / Android 在 isolate 后处理）
+  │        → 磁盘缓存（tmp/anime4k_v4_cache/<key.hashCode>.png）
+  └─ 否则 v1（Anime4KService，纯 Dart 算法）
+```
+
+### 设置键（appdata.settings）
+
+| 键 | 默认 | 语义 |
+|---|---|---|
+| `enableAnime4K` | false | 总开关（reader settings 可按漫画覆盖） |
+| `anime4KVersion` | 'v1' | 'v1' 纯算法 / 'v4' AI 模型 |
+| `anime4KV4MaxEdge` | 1600 | 输入长边上限；**超过则跳过超分保持原图**（对齐 localManga），0=不限制 |
+| `anime4KV4Scale` | 2 | 输出倍数细调；0=模型原生；4x 模型可选 4/3/2（低倍=推理后缩小） |
+| `anime4KV4Model` | (prefs) | 选中模型 id，默认注册表顺序第一个已下载的…实际代码默认 `'anime4k_x4'` |
+
+v4 磁盘缓存键：`v4_<modelId>_s<effScale>_e<maxEdge>_<cacheKey>`
+（v1 键：`<cacheKey>_<scale>_<push>_<grad>`；intensity 已废弃不用，键里已无）
+
+## 3. 关键技术事实与坑（接手必读）
+
+1. **`OrtSession.fromFile` 在 Windows 必然失败**：ORT 的 Windows 构建 `ORTCHAR_T=wchar_t`，
+   而插件传 UTF-8 窄字符路径。**必须用 `OrtSession.fromBuffer`**（读入内存建会话）。
+   引擎里 `createOrtSession()` 已封装，别改回 fromFile。
+2. **`OrtValueTensor.createTensorWithDataList` 的类型推断**：必须传 `[float32List]`
+   （嵌套一层）才是 float32；直接传 `Float32List` 会被当成 float64。
+3. **可变分块下输出是矩形**：输出尺寸要从张量嵌套结构下探取 H/W
+   （`_flattenTensor` 已实现），不能 `sqrt(len/channels)`。
+4. **只支持"输出 = 输入×原生倍数"的模型**（ESRGAN/SRVGGNetCompact/ACNet 家族）。
+   waifu2x cunet/swin 是 valid-conv（输出比输入×2小36px），localManga 用 ncnn 处理，
+   Dart 引擎不收录（曾收录后移除，避免裁剪偏差）。
+5. **MangaJaNai 输入边长必须是偶数**（pixel-unshuffle），用边缘复制补齐
+   （等价 `np.pad(mode='edge')`），见 `inputMultiple: 2`。
+6. **跳过策略是效果的核心**：长边超限的页必须保持原图，不要改成"缩小再超分"。
+7. **插件 `onnxruntime: 1.4.1`（gtbluesky）自带各平台动态库**，Windows 下由 CMake
+   `bundled_libraries` 自动把 `onnxruntime.dll` 部署到 exe 旁（纯 Dart FFI，无原生代码）。
+   包本体依赖 Flutter SDK，纯 Dart 环境用需打补丁（见 §5 harness）。
+8. **Android 打包冲突**：原生 `onnxruntime-android` 与 Dart 插件都带 `libonnxruntime.so`，
+   `android/app/build.gradle` 已加 `packagingOptions { jniLibs { pickFirsts += ['lib/**/libonnxruntime.so'] } }`，
+   Android 推理只走原生通道，删掉会构建失败。
+9. **pubspec 固定 `flutter: 3.38.5`（精确版本）**，CI 已对齐 3.38.5。
+   若升 Flutter 必须同步改 pubspec environment + 5 个 workflow 文件
+   （`.github/workflows/{Windows,Linux,Mac,Ios}dart.yml` + `build_apk.yml`）。
+10. **用户 fork 的 push 不会自动触发 workflow**（GitHub 对 fork 的限制）。
+    触发方式二选一：
+    - Actions 页 → Build Windows → **Run workflow** 按钮；
+    - API：`POST /repos/heloka/Venera-SSR/actions/workflows/Windowsdart.yml/dispatches` + `{"ref":"main"}`（204=成功）。
+11. **本机不能构建 Windows 包**：VS 2022 BuildTools 缺 CMake 工具与 Windows SDK 组件
+    （flutter doctor 可复现）。构建一律走 CI。
+12. 本机临时验证环境（**在 TEMP 下，可能被系统清理**，丢了按 §5 重建）：
+    - Flutter SDK 3.38.5：`C:\Users\atri\AppData\Local\Temp\flutter_sdk_dir\flutter`
+    - Dart SDK 3.9.4：`C:\Users\atri\AppData\Local\Temp\dart-sdk-dir\dart-sdk`
+    - 引擎验证 harness：`C:\Users\atri\AppData\Local\Temp\ort_harness`
+      （内含打补丁的纯 Dart 版 onnxruntime 包 `../ort_pkg_dart` + 已下载模型 `models/`）
+    - GitHub API 脚本：`C:\Users\atri\AppData\Local\Temp\gh_api.sh`（用 git credential 里的令牌，勿回显）
+
+## 4. 与 localManga 的对齐关系（参考实现，用户是作者）
+
+参考代码：`D:\04_Work_Learning\Projects\Vibe\localManga\server\upscale\`
+（`engine.py` 推理核心 / `catalog.py` 模型目录 / `scheduler.py` 调度与跳过 / `runtime.py` 路由）
+
+| 行为 | localManga | Venera 现状 | 一致性 |
+|---|---|---|---|
+| 输入归一化 | `/255` float32 NCHW | 同 | ✅ |
+| 分块 | 核心512+每侧重叠16，边缘收拢，补 inputMultiple | 同（模型注册表参数化） | ✅ |
+| 超长边策略 | skipped，保持原图 | 同（抛 UpscaleSkippedException→显示原图） | ✅ |
+| 默认模型/倍数 | realesr-animevideov3，输出 2× | 同 | ✅ |
+| 倍数细调 | output_scales，推理后 LANCZOS 缩小 | 同（image 包无 lanczos，用 cubic） | ≈ |
+| intensity/对比缩放 | 无 | 已移除 | ✅ |
+| TTA/mix_ratio/denoise | 有（ncnn 模型系） | 未实现（默认关闭/100，不影响默认效果） | ❌ 按需 |
+| GPU | onnxruntime-directml | 仅 CPU（插件 dll 是 CPU 版） | ❌ 速度差，画质同 |
+| MangaJaNai 模型 | `haesslerian/MangaJaNai_V1_ONNX` pinned commit，sha256 校验 | 同一文件同一 sha256 | ✅ |
+| Real-CUGAN/waifu2x | ncnn bundle（外部 exe） | 未收录（无可靠 ONNX） | ❌ 有意为之 |
+
+模型 URL 都写在 `upscale_models.dart` 的 `defaultUrls`（镜像在前：ghproxy/hf-mirror → 官方源）。
+MangaJaNai sha256：`214a387e64a71c1e41751453269ee2ff1ee9f33b32429c615dc7ea91238d9ee0`。
+
+## 5. 验证方法
+
+```bash
+# Flutter 侧（用临时 SDK；若无则重下 https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_3.38.5-stable.zip）
+flutter pub get
+flutter analyze          # 应 0 error（现存 11 条 info/warning 均为旧代码遗留）
+flutter test             # 17 个测试应全过（test/anime4k_test.dart + channel_test.dart）
+
+# 引擎真模型验证（harness，绕过 Flutter 直接跑仓库的纯 Dart 核心）
+cd %TEMP%/ort_harness
+# 把仓库 lib/utils/anime4k/{ort_upscale_core,upscale_models}.dart 拷到 lib/src_copy/ 覆盖
+../dart-sdk-dir/dart-sdk/bin/dart.exe pub get
+../dart-sdk-dir/dart-sdk/bin/dart.exe bin/test_localmanga.dart
+# 期望：MangaJaNai 700x451(奇数页) → 1400x902 无接缝；2000x3000 页 @1600 上限抛 skipped；
+#       animevideov3 outputScale null/3/2 → 1200x868 / 900x651 / 600x434
+```
+
+harness 的 `models/` 里已有：anime4k_acnet / realesr_animevideov3 /
+mangajanai_1600p_2x / realesr_general_x4v3（waifu2x 两个已弃用可删）。
+打补丁的 onnxruntime 包在 `%TEMP%/ort_pkg_dart`（原包拷贝后删除 pubspec 的 flutter 依赖、
+plugin 段、topics 段，和 `lib/src/ort_session.dart` 的 `package:flutter/services.dart` import）。
+
+## 6. 当前状态
+
+- 本地 main = `67b598f`，已推送 fork；CI Build Windows 三连绿
+  （最新 run：`37582712406`，产物 `Venera-Windows-v2.1.5.zip` 23.5MB，2027-01-05 过期）。
+- 分析器 0 错误；测试 17/17 通过；真模型验证全绿（含目测接缝）。
+- 用户已反馈的体验项均已实现：状态胶囊（超分中/排队/已处理/已跳过，可点开任务面板）、
+  对比原图（任务面板顶部开关，原图/超分图双变体共存 imageCache 秒切）、
+  输出倍数细调、实时生效（改设置即清 imageCache + ComicImage.clear()）。
+
+## 7. 已知限制与可能的后续方向
+
+1. **桌面只有 CPU 推理**：DirectML 需要把 `windows/onnxruntime.dll` 换成 DML 构建
+   （Microsoft onnxruntime-directml 发布包）并注册 DML EP；插件 API 未暴露 EP 配置，
+   需要自写少量 FFI 或换 `flutter_onnxruntime` 包。收益：MangaJaNai 从 ~30s/页 → 秒级。
+2. **Real-CUGAN / waifu2x 未收录**：无可靠 ONNX；若必须要，路线是像 localManga 那样
+   内置 ncnn-vulkan CLI 外部进程（架构完全不同，需单独设计）。
+3. **TTA / mix_ratio / denoise 未实现**（localManga 有；默认配置下不影响效果）。
+4. iOS/macOS CI 带上新插件后未验证过构建（iOS pod 依赖 `onnxruntime-objc 1.15.1`）。
+5. Windows ARM64：插件的 dll 是 x64，加载失败会优雅回退 v1（无崩溃）。
+6. AI 上色（Colorization）仍是 Android 专属，本次未动。
+7. v1 算法（anime4k_service/anime4k_upscaler）完全未动。
+8. fork 的 `publish_release.yml`（workflow_run 触发）在 fork 上没跑过——Release 附件
+   一直没自动生成，产物在 Actions run 页面下载。可排查或手动发 Release。
+
+## 8. 常用操作
+
+```bash
+# 提交推送（remote 名叫 fork）
+git add -A && git commit -m "..." && git push fork main
+
+# 触发 Windows 构建（fork 不自动触发）
+curl -X POST -H "Authorization: Bearer <token>" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/heloka/Venera-SSR/actions/workflows/Windowsdart.yml/dispatches \
+  -d '{"ref":"main"}'
+# token 来源：git credential fill（本机 GCM 已存）；或 Actions 页 Run workflow 按钮
+
+# 查状态 / 产物
+curl -s https://api.github.com/repos/heloka/Venera-SSR/actions/runs?per_page=5
+# 产物在 run 页面底部 Artifacts，命名 Venera-Windows-v<版本>.zip
+```
+
+## 9. 相关翻译键（assets/translation.json，zh_CN/zh_TW 两节）
+
+超分相关新增键都以英文原文为 key（`.tl` 精确匹配）：`AI Upscale` / `Upscale Tasks` /
+`Compare Original` / `Output Scale` / `Max Input Edge` / `Native` / `Downscaled` /
+`Waiting in queue` / `Upscaling` / `Processed` / `Skipped` / `Failed` / `Queued` /
+`Unlimited` / `No upscale tasks yet` 等，以及 6 个模型 description 全文。
