@@ -17,6 +17,29 @@ import 'upscale_status_tracker.dart';
 const _bundleVersion = '20220728';
 const _bundleSha256 =
     'c6e08d46c11704b1e3a1ada9ddd591cb5005f52f132136c8633ba25def400e01';
+const _modelVariants = {
+  'models-se': [
+    'up2x-no-denoise',
+    'up2x-conservative',
+    'up2x-denoise1x',
+    'up2x-denoise2x',
+    'up2x-denoise3x',
+    'up3x-no-denoise',
+    'up3x-conservative',
+    'up3x-denoise3x',
+    'up4x-no-denoise',
+    'up4x-conservative',
+    'up4x-denoise3x',
+  ],
+  'models-pro': [
+    'up2x-no-denoise',
+    'up2x-conservative',
+    'up2x-denoise3x',
+    'up3x-no-denoise',
+    'up3x-conservative',
+    'up3x-denoise3x',
+  ],
+};
 
 @immutable
 class UpscaleConfig {
@@ -392,14 +415,10 @@ class RealCuganUpscaler {
         'realcugan-ncnn-vulkan.exe',
         'vcomp140.dll',
         'LICENSE',
-        for (final model in ['models-se', 'models-pro'])
-          for (final weight in [
-            'up2x-no-denoise.param',
-            'up2x-no-denoise.bin',
-            'up2x-conservative.param',
-            'up2x-conservative.bin',
-          ])
-            path.join(model, weight),
+        for (final entry in _modelVariants.entries)
+          for (final variant in entry.value)
+            for (final extension in ['param', 'bin'])
+              path.join(entry.key, '$variant.$extension'),
       ];
       final complete = await Future.wait(
         required.map((relative) => File(path.join(root, relative)).exists()),

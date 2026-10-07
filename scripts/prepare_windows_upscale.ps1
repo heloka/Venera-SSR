@@ -53,17 +53,33 @@ try {
     }
   }
 
-  foreach ($modelName in @('models-se', 'models-pro')) {
+$modelVariants = @{
+  'models-se' = @(
+    'up2x-no-denoise', 'up2x-conservative', 'up2x-denoise1x', 'up2x-denoise2x', 'up2x-denoise3x',
+    'up3x-no-denoise', 'up3x-conservative', 'up3x-denoise3x',
+    'up4x-no-denoise', 'up4x-conservative', 'up4x-denoise3x'
+  )
+  'models-pro' = @(
+    'up2x-no-denoise', 'up2x-conservative', 'up2x-denoise3x',
+    'up3x-no-denoise', 'up3x-conservative', 'up3x-denoise3x'
+  )
+}
+$requiredModelFiles = [System.Collections.Generic.List[string]]::new()
+foreach ($modelName in $modelVariants.Keys) {
     $modelDirectory = Join-Path $sourceDirectory $modelName
     if (-not (Test-Path -LiteralPath $modelDirectory -PathType Container)) {
       throw "The Real-CUGAN archive is missing $modelName."
     }
-    foreach ($weight in @('up2x-no-denoise.param', 'up2x-no-denoise.bin', 'up2x-conservative.param', 'up2x-conservative.bin')) {
-      if (-not (Test-Path -LiteralPath (Join-Path $modelDirectory $weight) -PathType Leaf)) {
-        throw "The Real-CUGAN archive is missing $modelName/$weight."
+    foreach ($variant in $modelVariants[$modelName]) {
+      foreach ($extension in @('param', 'bin')) {
+        $weight = "$variant.$extension"
+        if (-not (Test-Path -LiteralPath (Join-Path $modelDirectory $weight) -PathType Leaf)) {
+          throw "The Real-CUGAN archive is missing $modelName/$weight."
+        }
+        $requiredModelFiles.Add("$modelName/$weight")
       }
     }
-  }
+}
 
   if (Test-Path -LiteralPath $destinationPath) {
     Remove-Item -LiteralPath $destinationPath -Recurse -Force
@@ -87,14 +103,11 @@ try {
     [Text.UTF8Encoding]::new($false)
   )
 
-  foreach ($required in @(
+  $requiredFiles = @(
     'realcugan-ncnn-vulkan.exe', 'vcomp140.dll', 'LICENSE',
-    'models-se/up2x-no-denoise.param', 'models-se/up2x-no-denoise.bin',
-    'models-se/up2x-conservative.param', 'models-se/up2x-conservative.bin',
-    'models-pro/up2x-no-denoise.param', 'models-pro/up2x-no-denoise.bin',
-    'models-pro/up2x-conservative.param', 'models-pro/up2x-conservative.bin',
     'realcugan-manifest.json'
-  )) {
+  ) + $requiredModelFiles.ToArray()
+  foreach ($required in $requiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $destinationPath $required) -PathType Leaf)) {
       throw "Staged Real-CUGAN runtime is incomplete: $required"
     }
