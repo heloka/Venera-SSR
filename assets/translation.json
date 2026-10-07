@@ -527,7 +527,19 @@
     "Failed to pick file: @e": "选择文件失败：@e",
     "name": "名称",
     "The URL should point to a 'index.json' file": "URL 应指向 'index.json' 文件",
-    "实验性": "实验性"
+    "实验性": "实验性",
+    "v4 (AI)": "v4 (AI)",
+    "Backend: ONNX Runtime + NNAPI (GPU), falls back to CPU on failure": "后端：ONNX Runtime + NNAPI（GPU），失败自动回退 CPU",
+    "Backend: ONNX Runtime (CPU, tiled inference in background isolate)": "后端：ONNX Runtime（CPU，后台 isolate 分块推理）",
+    "Max Input Edge": "输入长边上限",
+    "Unlimited": "不限制",
+    "v4 uses AI models (ONNX), requires model download; v1 works offline": "v4 使用 AI 模型（ONNX），需先下载模型；v1 离线可用",
+    "Official Anime4K v4 ACNet, lightweight and fast, anime 2x, works offline": "官方 Anime4K v4 ACNet，轻量极速，动漫 2×，开箱即用",
+    "Real-ESRGAN animevideov3, fast, anime video 4x": "Real-ESRGAN animevideov3，速度快，动漫视频画面 4×",
+    "MangaJaNai V1, trained for B/W manga, text and halftone, 2x (large, slower)": "MangaJaNai V1，专为黑白漫画/文字/网点训练，2×（体积大、推理较慢）",
+    "Classic Waifu2x CUNet, anime illustration lines and halftone, 2x (slower)": "经典 Waifu2x CUNet，动漫插画线条/网点 2×（较慢）",
+    "Waifu2x with SwinIR architecture, stronger details, 2x (slow)": "Waifu2x 新版 SwinIR 架构，细节更强 2×（慢）",
+    "Real-ESRGAN general-x4v3, universal for photos and color pages, 4x": "Real-ESRGAN general-x4v3，照片/彩色页通用 4×"
   },
   "en_US": {
     "Home": "Home",
@@ -1587,6 +1599,18 @@
     "Failed to pick file: @e": "選擇檔案失敗：@e",
     "name": "名稱",
     "The URL should point to a 'index.json' file": "URL 應指向 'index.json' 檔案",
-    "实验性": "實驗性"
+    "实验性": "實驗性",
+    "v4 (AI)": "v4 (AI)",
+    "Backend: ONNX Runtime + NNAPI (GPU), falls back to CPU on failure": "後端：ONNX Runtime + NNAPI（GPU），失敗自動回退 CPU",
+    "Backend: ONNX Runtime (CPU, tiled inference in background isolate)": "後端：ONNX Runtime（CPU，背景 isolate 分塊推理）",
+    "Max Input Edge": "輸入長邊上限",
+    "Unlimited": "不限制",
+    "v4 uses AI models (ONNX), requires model download; v1 works offline": "v4 使用 AI 模型（ONNX），需先下載模型；v1 離線可用",
+    "Official Anime4K v4 ACNet, lightweight and fast, anime 2x, works offline": "官方 Anime4K v4 ACNet，輕量極速，動漫 2×，開箱即用",
+    "Real-ESRGAN animevideov3, fast, anime video 4x": "Real-ESRGAN animevideov3，速度快，動漫視頻畫面 4×",
+    "MangaJaNai V1, trained for B/W manga, text and halftone, 2x (large, slower)": "MangaJaNai V1，專為黑白漫畫/文字/網點訓練，2×（體積大、推理較慢）",
+    "Classic Waifu2x CUNet, anime illustration lines and halftone, 2x (slower)": "經典 Waifu2x CUNet，動漫插畫線條/網點 2×（較慢）",
+    "Waifu2x with SwinIR architecture, stronger details, 2x (slow)": "Waifu2x 新版 SwinIR 架構，細節更強 2×（慢）",
+    "Real-ESRGAN general-x4v3, universal for photos and color pages, 4x": "Real-ESRGAN general-x4v3，照片/彩色頁通用 4×"
   }
 }

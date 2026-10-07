@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -10,20 +9,21 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/log.dart';
 
 import 'anime4k_v4_model_manager.dart';
+import 'ort_upscale_core.dart';
+import 'ort_upscale_worker.dart';
 
 /// Anime4K v4 超分服务（带模型版本）
 ///
-/// 基于 Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN 4× / 通用 2×），经原生
-/// （Kotlin + ONNX Runtime + NNAPI GPU）完成超分辨率，倍数由模型实际维度决定。
-/// 设计严格对齐 [ColorizationService]：
-///  - 单例 + 缓存 + 任务队列；
-///  - 通过 [com.github.kiastr.venera_ssr/colorize] MethodChannel 调用，
-///    与原生 [ColorizeEngine.colorizeEsrgan] 对接（复用上色通道，无需新增原生方法）；
-///  - 推理在原生后台线程执行，失败自动从 NNAPI 回退 CPU。
+/// 基于 AI 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN / MangaJaNai /
+/// Waifu2x 家族，见 [UpscaleModels.all]），倍数由模型实际维度决定。
 ///
-/// 与 v1（纯 Dart CPU 算法）并存：reader 侧按 `anime4KVersion` 选择引擎；
-/// v4 仅 Android 生效（NNAPI/ONNX Runtime 为 Android 原生实现），非 Android 时
-/// [isAvailable] 为 false，reader 自动回退 v1。
+/// 按平台路由推理后端：
+///  - Android：经 [com.github.kiastr.venera_ssr/colorize] MethodChannel 调用原生
+///    （Kotlin + ONNX Runtime + NNAPI GPU），失败自动回退 CPU；
+///  - Windows / Linux / macOS：onnxruntime Dart FFI（插件自带各平台动态库），
+///    在常驻 isolate 中分块推理（[OrtUpscaleWorker]），模型只加载一次。
+///
+/// 与 v1（纯 Dart CPU 算法）并存：reader 侧按 `anime4KVersion` 选择引擎。
 class Anime4KV4Service {
   Anime4KV4Service._internal();
 
@@ -37,8 +37,13 @@ class Anime4KV4Service {
   static const MethodChannel _channel =
       MethodChannel('com.github.kiastr.venera_ssr/colorize');
 
+  /// 桌面端 ONNX Runtime（Dart FFI）是否可用（iOS 依赖静态链接，暂不支持）
+  static bool get _ortSupported =>
+      App.isWindows || App.isLinux || App.isMacOS;
+
   String? _cacheDir;
   String? _modelPath;
+  OrtUpscaleWorker? _worker;
 
   final Set<String> _processingKeys = {};
   static const int _maxConcurrentTasks = 2;
@@ -65,22 +70,38 @@ class Anime4KV4Service {
     }
   }
 
-  /// 切换 v4 超分模型（4x/2x）。重置原生会话、重载模型路径、清空超分缓存
-  /// （不同倍数输出尺寸不同，缓存不可复用）。
+  /// 切换 v4 超分模型（不同倍数输出尺寸不同）。重置后端会话（Android 原生 /
+  /// 桌面 worker isolate）、清空超分缓存（缓存不可跨模型复用）。
   Future<void> setModel(String id) async {
     if (!Anime4KV4ModelManager.isValidModelId(id)) return;
     await Anime4KV4ModelManager.setSelectedModelId(id);
     appdata.settings['anime4KV4Model'] = id;
     appdata.saveData();
-    await resetNativeSession();
+    await _resetBackendSession();
     await Anime4KV4ModelManager.extractBundledModelIfNeeded();
     _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
     await clearCache();
   }
 
-  /// 模型是否可用（已下载到本地且当前平台支持）
+  /// 释放后端已加载的模型会话（模型变更/导入/删除后必须调用）
+  Future<void> _resetBackendSession() async {
+    if (_worker != null) {
+      try {
+        await _worker!.reset();
+      } catch (e) {
+        Log.error('Anime4KV4', 'worker reset failed: $e');
+      }
+    }
+    try {
+      await _channel.invokeMethod<void>('resetSession');
+    } catch (e) {
+      // 非 Android 平台没有该通道，忽略
+    }
+  }
+
+  /// 模型是否可用（已下载到本地且当前平台有可用推理后端）
   bool get isAvailable =>
-      App.isAndroid && _modelPath != null;
+      (App.isAndroid || _ortSupported) && _modelPath != null;
 
   Future<bool> checkModelAvailable() async {
     if (_modelPath != null) {
@@ -144,25 +165,19 @@ class Anime4KV4Service {
     }
   }
 
-  /// 丢弃原生端已缓存的 ONNX 会话（模型变更/导入/删除后必须调用）
-  Future<void> resetNativeSession() async {
-    try {
-      await _channel.invokeMethod<void>('resetSession');
-    } catch (e, s) {
-      Log.error('Anime4KV4', 'resetNativeSession failed: $e\n$s');
-    }
-  }
+  /// 丢弃后端已缓存的 ONNX 会话（模型变更/导入/删除后必须调用）。
+  /// Android 为原生会话；桌面为 worker isolate 中的会话。
+  Future<void> resetNativeSession() => _resetBackendSession();
 
   /// 处理图片字节数据，返回超分后的 PNG 字节数据（倍数由模型决定，2x/4x）。
   ///
-  /// 模型缺失或非 Android 时直接返回 null（上层据此回退 v1 或保持原图）。
+  /// 模型缺失或平台无推理后端时返回 null（上层据此回退 v1 或保持原图）。
   Future<Uint8List?> processImage({
     required Uint8List imageBytes,
     required String cacheKey,
     double intensity = 1.0,
   }) async {
-    if (!App.isAndroid) {
-      // v4 依赖 Android 原生 ONNX Runtime，非 Android 不处理（reader 自动回退 v1）
+    if (!(App.isAndroid || _ortSupported)) {
       return null;
     }
     if (_modelPath == null) {
@@ -174,9 +189,12 @@ class Anime4KV4Service {
     final modelPath = _modelPath;
     if (modelPath == null) return null;
 
-    // 前缀含模型 id（4x/2x 输出尺寸不同）+ intensity，避免串图与旧缓存复用
+    final maxEdge =
+        (appdata.settings['anime4KV4MaxEdge'] as num?)?.toInt() ?? 1600;
+
+    // 缓存键含模型 id（倍数不同）+ 长边上限（输出尺寸不同）+ intensity，避免串图
     final fullKey =
-        'v4_${Anime4KV4ModelManager.selectedDef.id}_${cacheKey}_${intensity.toStringAsFixed(2)}';
+        'v4_${Anime4KV4ModelManager.selectedDef.id}_e${maxEdge}_${cacheKey}_${intensity.toStringAsFixed(2)}';
 
     final cached = await _getFromCache(fullKey);
     if (cached != null) {
@@ -193,13 +211,19 @@ class Anime4KV4Service {
 
     return _enqueueTask(() async {
       try {
-        Log.info('Anime4KV4', 'processing image $cacheKey');
+        Log.info('Anime4KV4',
+            'processing image $cacheKey (${Anime4KV4ModelManager.selectedDef.id}, maxEdge=$maxEdge)');
 
-        var result = await _upscaleOnNative(imageBytes, modelPath, intensity, true);
-        // NNAPI 失败（不支持/崩溃）时回退纯 CPU 重试一次
-        if (result == null) {
-          Log.warning('Anime4KV4', 'NNAPI failed, retry with CPU for $cacheKey');
-          result = await _upscaleOnNative(imageBytes, modelPath, intensity, false);
+        Uint8List? result;
+        if (App.isAndroid) {
+          result = await _upscaleOnNative(
+              imageBytes, modelPath, intensity, true);
+          // NNAPI 失败（不支持/崩溃）时回退纯 CPU 重试一次
+          result ??= await _upscaleOnNative(
+              imageBytes, modelPath, intensity, false);
+        } else {
+          result = await _upscaleOnDesktop(imageBytes, modelPath, intensity,
+              maxEdge, Anime4KV4ModelManager.selectedDef);
         }
 
         if (result != null) {
@@ -214,6 +238,46 @@ class Anime4KV4Service {
         _processingKeys.remove(fullKey);
       }
     });
+  }
+
+  /// 桌面端：常驻 worker isolate 中分块推理。
+  /// worker 崩溃/超时则重建一次重试，仍失败返回 null（reader 回退 v1/原图）。
+  Future<Uint8List?> _upscaleOnDesktop(Uint8List imageBytes,
+      String modelPath, double intensity, int maxEdge, UpscaleModelDef def) async {
+    for (int attempt = 0; attempt < 2; attempt++) {
+      OrtUpscaleWorker? worker = _worker;
+      try {
+        worker ??= await OrtUpscaleWorker.spawn();
+        _worker = worker;
+        await worker.ensureLoaded(def, modelPath);
+        final sw = Stopwatch()..start();
+        final result = await worker.run(
+          OrtUpscaleRequest(
+            imageBytes: imageBytes,
+            modelPath: modelPath,
+            model: def,
+            maxInputEdge: maxEdge,
+            intensity: intensity,
+          ),
+          onProgress: (p) {
+            if (p == 0 || (p * 100).round() % 25 == 0) {
+              Log.info('Anime4KV4',
+                  'progress ${(p * 100).toStringAsFixed(0)}%');
+            }
+          },
+        );
+        Log.info('Anime4KV4',
+            'desktop upscale done in ${sw.elapsedMilliseconds}ms');
+        return result;
+      } catch (e, s) {
+        Log.error('Anime4KV4',
+            'desktop upscale failed (attempt ${attempt + 1}): $e\n$s');
+        // worker 可能已崩溃/失联：销毁并重建后重试
+        _worker?.dispose();
+        _worker = null;
+      }
+    }
+    return null;
   }
 
   Future<T?> _enqueueTask<T>(Future<T?> Function() task) async {

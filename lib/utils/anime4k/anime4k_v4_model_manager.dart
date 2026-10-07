@@ -1,92 +1,33 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/utils/anime4k/upscale_models.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 
-/// 单个 v4 超分模型的定义。
+export 'upscale_models.dart' show UpscaleModelDef, UpscaleModels;
+
+/// v4 超分模型管理器：管理 v4 AI 超分 ONNX 模型的生命周期。
 ///
-/// [scale] 仅作 UI 提示；真正的放大倍数与输入通道数（3=RGB / 1=Y）由原生 [ColorizeEngine.getModelInfo] 从模型
-/// 实际输入/输出维度探测，因此换权重（4x/2x）无需改原生代码。
-class V4ModelDef {
-  final String id;
-  final String fileName;
-  final String displayName;
-  final int scale;
-  final int sizeHintMB;
-  final String? bundledAssetPath;
-  final List<String> defaultUrls;
-
-  const V4ModelDef({
-    required this.id,
-    required this.fileName,
-    required this.displayName,
-    required this.scale,
-    required this.sizeHintMB,
-    this.bundledAssetPath,
-    required this.defaultUrls,
-  });
-}
-
-/// v4 超分模型管理器：管理 Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN
-/// 4× / 通用 2×）的生命周期。支持多模型，所有对外方法按“当前选中模型”路由，调用方无需传 modelId。
+/// 模型注册表见 [UpscaleModels.all]（Anime4K ACNet / Real-ESRGAN / MangaJaNai /
+/// Waifu2x 家族，参考 mihon_img_upscale 与 localManga 的常用模型集）。
+/// 所有对外方法按“当前选中模型”路由，调用方无需传 modelId。
 ///
 /// 模型获取策略（三选一，优先级从高到低）：
 ///  1. 自选外部模型（用户从本地导入，最高优先，绝不被覆盖）；
-///  2. 打包进 APK 的内置模型（[extractBundledModelIfNeeded] 抽取到应用目录，开箱即用；
-///     ACNet 官方 onnx 仅 ~21KB 故打包，Real-ESRGAN 较大仍走下载，保持 APK 精简）；
-///  3. 运行时下载（下载管理器保留：用户删除模型后可重新下载，或切换镜像/自选模型）。
+///  2. 打包进安装包的内置模型（[extractBundledModelIfNeeded] 抽取到应用目录，开箱即用；
+///     ACNet 官方 onnx 仅 ~21KB 故打包，其余较大仍走下载）；
+///  3. 运行时下载（保留镜像列表、断点续传与 sha256 校验）。
 ///
 /// 其他约定：
-///  - 通过 [ColorizationService] 复用的 [com.github.kiastr.venera_ssr/colorize] MethodChannel
-///    的 `copyUri` 方法完成“自选本地模型”的拷贝（不额外新增原生方法）。
-///  - 每个模型的调用位置为 [getApplicationSupportDirectory]/<fileName>，
-///    原生 [ColorizeEngine.colorizeEsrgan] 经 createSession(modelPath) 直接读取。
+///  - 每个模型的落盘位置为 [getApplicationSupportDirectory] 下的 `fileName`，
+///    Android 原生 ColorizeEngine 与桌面端 OrtUpscaleWorker 均直接读取该路径。
 class Anime4KV4ModelManager {
-  /// 模型注册表：4x 动画模型 + 2x 通用模型。新增权重只需在此追加一项。
-  static final List<V4ModelDef> models = [
-    V4ModelDef(
-      id: 'anime4k_acnet',
-      fileName: 'anime4k_acnet.onnx',
-      displayName: 'Anime4K v4 ACNet (2×)',
-      scale: 2,
-      sizeHintMB: 2,
-      // ACNet 官方 onnx 仅 ~21KB，远小于 4MB：直接打包进 APK，开箱即用（同 deoldify 模式）
-      bundledAssetPath: 'assets/models/anime4k_acnet.onnx',
-      defaultUrls: [
-        'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
-        'https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
-      ],
-    ),
-    V4ModelDef(
-      id: 'anime4k_x4',
-      fileName: 'realesr_animevideov3.onnx',
-      displayName: '动画 4× (Real-ESRGAN)',
-      scale: 4,
-      sizeHintMB: 4,
-      bundledAssetPath: null, // 不再打包：保留为可选下载模型，不破坏原有功能
-      defaultUrls: [
-        'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
-        'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
-      ],
-    ),
-    V4ModelDef(
-      id: 'general_x2',
-      fileName: 'realesr_general_x2c.onnx',
-      displayName: '通用 2× (Real-ESRGAN)',
-      scale: 2,
-      sizeHintMB: 8,
-      bundledAssetPath: null, // 运行时下载
-      defaultUrls: [
-        'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
-        'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
-      ],
-    ),
-  ];
 
   /// 有效模型最小体积（8KB）。ACNet onnx 仅 ~21KB、animevideov3 约 4MB、general-x2c 约 8MB；
   /// 下限用于拦掉损坏/空文件（下载错误页通常仅数 KB，<8KB 视为无效）。
@@ -109,19 +50,19 @@ class Anime4KV4ModelManager {
   /// 有效模型的最小体积（字节），供 UI 侧拷贝后做体积校验
   static int get validModelMinSize => _validModelMinSize;
 
-  static V4ModelDef _modelById(String id) =>
-      models.firstWhere((m) => m.id == id, orElse: () => models.first);
+  static UpscaleModelDef _modelById(String id) => UpscaleModels.byId(id);
 
   /// 当前选中模型的定义
-  static V4ModelDef get selectedDef => _modelById(_selectedModelId);
+  static UpscaleModelDef get selectedDef => _modelById(_selectedModelId);
 
   /// 当前选中模型的文件名（调用位置文件名）
   static String get modelFileName => selectedDef.fileName;
 
   /// 全部可用模型（供 UI 构建选择器）
-  static List<V4ModelDef> getModels() => List.unmodifiable(models);
+  static List<UpscaleModelDef> getModels() => List.unmodifiable(UpscaleModels.all);
 
-  static bool isValidModelId(String id) => models.any((m) => m.id == id);
+  static bool isValidModelId(String id) =>
+      UpscaleModels.all.any((m) => m.id == id);
 
   /// 切换当前选中模型并持久化；重置内存态（含下载/自选状态），下次读取从 prefs 重载。
   static Future<void> setSelectedModelId(String id) async {
@@ -395,6 +336,16 @@ class Anime4KV4ModelManager {
           });
           final downloaded = await File(tempPath).length();
           if (downloaded > _validModelMinSize) {
+            // 已知 hash 的模型做完整性校验（不匹配按镜像失败处理，尝试下一个）
+            if (def.sha256 != null) {
+              final digest = await sha256
+                  .bind(File(tempPath).openRead())
+                  .first;
+              if (digest.toString() != def.sha256) {
+                throw Exception(
+                    'sha256 mismatch: got ${digest.toString().substring(0, 12)}...');
+              }
+            }
             await File(tempPath).rename(targetPath);
             _cachedModelPath = targetPath;
             _customModelActive = false;

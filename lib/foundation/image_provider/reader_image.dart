@@ -9,7 +9,6 @@ import 'package:venera/foundation/log.dart';
 import 'base_image_provider.dart';
 import 'reader_image.dart' as image_provider;
 import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/app.dart';
 import 'package:venera/utils/anime4k/anime4k_service.dart';
 import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
@@ -123,8 +122,9 @@ class ReaderImageProvider
     // ===== Anime4K 超分处理 =====
     // 在 ImageProvider.load 阶段处理图片字节，与自定义图片处理相同位置，
     // 确保无论阅读器用什么 widget 渲染都会生效。
-    // v1（纯 Dart CPU 算法）与 v4（ONNX Runtime + NNAPI GPU，AI 模型）并存，
-    // 由 anime4KVersion 选择引擎；v4 仅 Android 生效，否则自动回退 v1。
+    // v1（纯 Dart CPU 算法）与 v4（AI 模型推理）并存，由 anime4KVersion 选择引擎；
+    // v4 的后端按平台路由（Android 原生 NNAPI / 桌面 ONNX Runtime FFI），
+    // 后端不可用（isAvailable=false）时自动回退 v1。
     final anime4KVersion = appdata.settings.getReaderSetting(
           cid, sourceKey ?? "", 'anime4KVersion') ??
         'v1';
@@ -133,7 +133,6 @@ class ReaderImageProvider
         true;
     if (enableAnime4K) {
       if (anime4KVersion == 'v4' &&
-          App.isAndroid &&
           Anime4KV4Service.instance.isAvailable) {
         try {
           final result = await Anime4KV4Service.instance.processImage(

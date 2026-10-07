@@ -169,11 +169,11 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         ).toSliver(),
         SelectSetting(
           title: "Anime4K Version".tl,
-          help: "v4 requires model download (Android only)".tl,
+          help: "v4 uses AI models (ONNX), requires model download; v1 works offline".tl,
           settingKey: "anime4KVersion",
           optionTranslation: {
             "v1": "v1 (CPU)".tl,
-            "v4": "v4 (AI · GPU)".tl,
+            "v4": "v4 (AI)".tl,
           },
           onChanged: () {
             PaintingBinding.instance.imageCache.clear();

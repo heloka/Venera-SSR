@@ -117,6 +117,14 @@ android {
         }
     }
 
+    // 原生 onnxruntime-android 与 onnxruntime(Dart FFI) 插件都携带 libonnxruntime.so，
+    // Android 端推理只走原生（MethodChannel），Dart 插件库不会被加载，保留第一份即可。
+    packagingOptions {
+        jniLibs {
+            pickFirsts += ['lib/**/libonnxruntime.so']
+        }
+    }
+
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
             def abi = output.getFilter(com.android.build.OutputFile.ABI)

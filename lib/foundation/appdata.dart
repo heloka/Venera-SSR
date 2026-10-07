@@ -231,8 +231,9 @@ class Settings with ChangeNotifier {
     'anime4KScaleFactor': 2.0, // upscale factor (1.0 - 4.0), v1 only
     'anime4KPushStrength': 0.15, // line refinement strength (0.0 - 1.0), v1 only; 配合边缘保护避免侵蚀细线
     'anime4KPushGradStrength': 1.0, // gradient refinement strength (0.0 - 1.0), v1 only
-    'anime4KVersion': 'v1', // Anime4K engine version: 'v1' (CPU algorithm) | 'v4' (AI model, GPU)
+    'anime4KVersion': 'v1', // Anime4K engine version: 'v1' (CPU algorithm) | 'v4' (AI model)
     'anime4KV4Intensity': 1.0, // v4 upscale intensity (reserved, currently fixed 1.0)
+    'anime4KV4MaxEdge': 1600, // v4 max input edge in px before tiling (0 = unlimited; speed/memory knob)
     'enableColorization': false, // enable image colorization
     'colorizationIntensity': 1.0, // colorization intensity (0.3 - 1.2)
   };

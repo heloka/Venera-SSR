@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 
 import 'package:venera/utils/anime4k/anime4k_upscaler.dart';
+import 'package:venera/utils/anime4k/ort_upscale_core.dart';
+import 'package:venera/utils/anime4k/upscale_models.dart';
 
 /// Tests for the Anime4K super-resolution component.
 ///
@@ -156,6 +158,62 @@ void main() {
       expect(decoded, isNotNull);
       expect(decoded!.width, 16);
       expect(decoded.height, 16);
+    });
+  });
+
+  group('UpscaleModels registry', () {
+    test('ids are unique and file names are valid', () {
+      final ids = UpscaleModels.all.map((m) => m.id).toSet();
+      expect(ids.length, UpscaleModels.all.length);
+      for (final m in UpscaleModels.all) {
+        expect(m.fileName.endsWith('.onnx'), true, reason: m.id);
+        expect(m.scale, greaterThanOrEqualTo(2), reason: m.id);
+        expect(m.defaultUrls, isNotEmpty, reason: m.id);
+        expect(m.channels, anyOf(1, 3), reason: m.id);
+      }
+    });
+
+    test('tile size satisfies model alignment and padding constraints', () {
+      for (final m in UpscaleModels.all) {
+        expect(m.tileIn % m.inputAlign, 0,
+            reason: 'tileIn must be a multiple of inputAlign for ${m.id}');
+        expect(m.tilePad * 2, lessThan(m.tileIn),
+            reason: 'core size must be positive for ${m.id}');
+        // waifu2x cunet/swin 是 valid-conv 模型，单侧裁剪约 18px，pad 必须覆盖
+        if (m.id.startsWith('waifu2x')) {
+          expect(m.tilePad, greaterThanOrEqualTo(18), reason: m.id);
+        }
+      }
+    });
+
+    test('bundled model exists as asset declaration for default id', () {
+      // 默认模型 ACNet 必须内置（保证桌面/Android 开箱即用）
+      final acnet = UpscaleModels.byId('anime4k_acnet');
+      expect(acnet.id, 'anime4k_acnet');
+      expect(acnet.bundledAssetPath, isNotNull);
+    });
+  });
+
+  group('computeTilePlan', () {
+    test('tiles exactly cover the image', () {
+      for (final (w, h) in [(1, 1), (100, 80), (352, 352), (353, 700), (1600, 1200)]) {
+        final plan = computeTilePlan(w, h, 384, 16);
+        expect(plan.core, 384 - 2 * 16);
+        expect(plan.cols * plan.core, greaterThanOrEqualTo(w));
+        expect(plan.rows * plan.core, greaterThanOrEqualTo(h));
+        expect((plan.cols - 1) * plan.core, lessThan(w));
+        expect((plan.rows - 1) * plan.core, lessThan(h));
+      }
+    });
+
+    test('single tile when image fits in core size', () {
+      final plan = computeTilePlan(300, 200, 384, 16);
+      expect(plan.cols, 1);
+      expect(plan.rows, 1);
+    });
+
+    test('rejects pad larger than half tile', () {
+      expect(() => computeTilePlan(100, 100, 256, 200), throwsArgumentError);
     });
   });
 }

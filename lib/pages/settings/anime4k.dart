@@ -4,8 +4,9 @@ part of 'settings_page.dart';
 ///
 /// 同时管理两个引擎版本：
 ///  - v1：纯 Dart CPU 算法（Gauss/Unblur/GradientRefine），缩放 1–4x，无模型文件；
-///  - v4：Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN 4× / 通用 2×），经原生
-///    ONNX Runtime + NNAPI(GPU) 超分，倍数/通道数由模型实际维度决定（getModelInfo 探测），仅 Android 生效。
+///  - v4：AI 超分 ONNX 模型（Anime4K ACNet / Real-ESRGAN / MangaJaNai / Waifu2x 家族），
+///    Android 走原生 ONNX Runtime + NNAPI(GPU)，Windows/Linux/macOS 走 onnxruntime Dart FFI
+///    （常驻 isolate 分块推理，CPU）。
 ///
 /// 两版本并存，由 `anime4KVersion` 设置选择；v4 选中时显示模型管理卡片，并隐藏 v1 专用滑块。
 class Anime4KSettings extends StatefulWidget {
@@ -46,6 +47,17 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   }
 
   String get _version => appdata.settings['anime4KVersion'] as String? ?? 'v1';
+
+  /// v4 推理后端说明（按平台）
+  String get _backendDescription {
+    if (App.isAndroid) {
+      return "Backend: ONNX Runtime + NNAPI (GPU), falls back to CPU on failure".tl;
+    }
+    return "Backend: ONNX Runtime (CPU, tiled inference in background isolate)".tl;
+  }
+
+  int get _maxEdge =>
+      (appdata.settings['anime4KV4MaxEdge'] as num?)?.toInt() ?? 1600;
 
   void _setVersion(String v) {
     if (_version == v) return;
@@ -146,8 +158,9 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         if (mounted) context.showMessage(message: "Please select a .onnx file".tl);
         return;
       }
-      // 通过原生 ContentResolver 以 64KB 分块拷贝（不占内存、不拷坏），
-      // 直接落到当前选中模型的调用位置（fileName）。
+      // Android 经原生 ContentResolver 以 64KB 分块拷贝（不占内存、不拷坏）；
+      // 桌面端 xFile.path 即真实文件路径，直接用 dart:io 拷贝。
+      // 均落到当前选中模型的调用位置（fileName）。
       final uri = xFile.path; // content URI 或真实文件路径
       final dir = await getApplicationSupportDirectory();
       final targetPath = path.join(dir.path, Anime4KV4ModelManager.modelFileName);
@@ -162,7 +175,16 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
 
       int written;
       try {
-        written = await Anime4KV4ModelManager.copyUriTo(uri, tempPath);
+        if (App.isAndroid) {
+          written = await Anime4KV4ModelManager.copyUriTo(uri, tempPath);
+        } else {
+          final srcFile = File(uri);
+          if (!await srcFile.exists()) {
+            throw Exception('file not found: $uri');
+          }
+          await srcFile.copy(tempPath);
+          written = await File(tempPath).length();
+        }
       } catch (e) {
         if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
         if (mounted) context.showMessage(message: "Failed to copy file: $e".tl);
@@ -170,14 +192,18 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
       }
 
       if (written < Anime4KV4ModelManager.validModelMinSize) {
-        await File(tempPath).delete().catchError((_) {});
+        try {
+          await File(tempPath).delete();
+        } catch (_) {}
         if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
         if (mounted) context.showMessage(message: "File too small, invalid model".tl);
         return;
       }
 
       await File(tempPath).rename(targetPath);
-      await File(bakPath).delete().catchError((_) {});
+      try {
+        await File(bakPath).delete();
+      } catch (_) {}
 
       // 记账为自选模型 + 失效原生会话缓存 + 让服务立即感知新路径
       await Anime4KV4ModelManager.markCustomModelActive(xFile.name);
@@ -288,7 +314,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         ),
         SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
             child: Wrap(
               spacing: 8,
               children: [
@@ -298,7 +324,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                   onSelected: (_) => _setVersion('v1'),
                 ),
                 ChoiceChip(
-                  label: Text("v4 (AI · GPU)".tl),
+                  label: Text("v4 (AI)".tl),
                   selected: isV4,
                   onSelected: (_) => _setVersion('v4'),
                 ),
@@ -306,13 +332,28 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ),
           ),
         ),
-        // v4 模型（倍数）选择：4x 动画 / 2x 通用
+        // 后端说明（按平台）
         if (isV4)
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                _backendDescription,
+                style: TextStyle(
+                  color: context.colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
+        // v4 模型（倍数）选择 + 说明
+        if (isV4)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
               child: Wrap(
                 spacing: 8,
+                runSpacing: 4,
                 children: Anime4KV4ModelManager.getModels().map((m) {
                   final selected = Anime4KV4ModelManager.selectedDef.id == m.id;
                   return ChoiceChip(
@@ -321,6 +362,57 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                     onSelected: (_) => _selectModel(m.id),
                   );
                 }).toList(),
+              ),
+            ),
+          ),
+        if (isV4)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                Anime4KV4ModelManager.selectedDef.description.tl,
+                style: TextStyle(
+                  color: context.colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
+        // v4 输入长边上限（速度/内存旋钮，值越大越清晰也越慢）
+        if (isV4)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: Text(
+                      "Max Input Edge".tl,
+                      style: TextStyle(
+                        color: context.colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  for (final edge in const [0, 1200, 1600, 2048, 2560])
+                    ChoiceChip(
+                      label: Text(edge == 0
+                          ? "Unlimited".tl
+                          : "${edge}px".tl),
+                      selected: _maxEdge == edge,
+                      onSelected: (_) {
+                        appdata.settings['anime4KV4MaxEdge'] = edge;
+                        appdata.saveData();
+                        PaintingBinding.instance.imageCache.clear();
+                        ComicImage.clear();
+                        setState(() {});
+                      },
+                    ),
+                ],
               ),
             ),
           ),
