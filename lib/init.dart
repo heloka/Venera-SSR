@@ -17,6 +17,7 @@ import 'package:venera/utils/app_links.dart';
 import 'package:venera/utils/handle_text_share.dart';
 import 'package:venera/utils/anime4k/anime4k_service.dart';
 import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
+import 'package:venera/utils/anime4k/realcugan_upscaler.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 import 'package:venera/utils/opencc.dart';
 import 'package:venera/utils/tags_translation.dart';
@@ -51,6 +52,7 @@ Future<void> init() async {
       OpenCC.init(),
       Anime4KService.instance.init().wait(),
       Anime4KV4Service.instance.init().wait(),
+      if (App.isWindows) RealCuganUpscaler.loadConfig().wait(),
       ColorizationService.instance.init().wait(),
     ];
     await Future.wait(futures);
@@ -64,7 +66,7 @@ Future<void> init() async {
     handleTextShare();
     try {
       await FlutterDisplayMode.setHighRefreshRate();
-    } catch(e) {
+    } catch (e) {
       Log.error("Display Mode", "Failed to set high refresh rate: $e");
     }
   }
@@ -101,9 +103,12 @@ void _checkOldConfigs() {
     appdata.writeImplicitData();
   }
 
-  if (appdata.settings['comicSourceListUrl'].toString().contains("git.nyne.dev")) {
+  if (appdata.settings['comicSourceListUrl'].toString().contains(
+    "git.nyne.dev",
+  )) {
     // migrate to jsdelivr cdn
-    appdata.settings['comicSourceListUrl'] = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
+    appdata.settings['comicSourceListUrl'] =
+        "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
     appdata.saveData();
   }
 }

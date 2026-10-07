@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 /// 超分任务状态：等待排队 → 超分中 → 已处理 / 已跳过 / 失败
-enum UpscaleJobStatus { queued, processing, done, skipped, failed }
+enum UpscaleJobStatus { queued, processing, done, skipped, failed, cancelled }
 
 /// 单个超分任务的状态记录（阅读器状态胶囊与任务面板展示用）
 class UpscaleJob {
@@ -25,6 +25,16 @@ class UpscaleJob {
   DateTime? finishedAt;
 
   String? error;
+
+  String? backendName;
+
+  Duration? elapsed;
+
+  int? outputWidth;
+
+  int? outputHeight;
+
+  VoidCallback? retryAction;
 
   UpscaleJob({
     required this.label,
@@ -50,7 +60,7 @@ class UpscaleStatusTracker extends ChangeNotifier {
   static const Duration doneRetention = Duration(seconds: 6);
 
   /// 失败任务的保留时长（面板里留时间查看错误）
-  static const Duration failedRetention = Duration(seconds: 60);
+  static const Duration failedRetention = Duration(minutes: 5);
 
   /// 任务记录上限（防极端情况下无界增长）
   static const int maxJobs = 60;
@@ -60,15 +70,16 @@ class UpscaleStatusTracker extends ChangeNotifier {
 
   /// 正在处理 + 等待排队的任务数
   int get activeCount => _jobs.values
-      .where((j) =>
-          j.status == UpscaleJobStatus.queued ||
-          j.status == UpscaleJobStatus.processing)
+      .where(
+        (j) =>
+            j.status == UpscaleJobStatus.queued ||
+            j.status == UpscaleJobStatus.processing,
+      )
       .length;
 
   /// 等待排队的任务数
-  int get queuedCount => _jobs.values
-      .where((j) => j.status == UpscaleJobStatus.queued)
-      .length;
+  int get queuedCount =>
+      _jobs.values.where((j) => j.status == UpscaleJobStatus.queued).length;
 
   /// 是否仍有任务在处理（胶囊显示转圈的条件）
   bool get isBusy => activeCount > 0;
@@ -83,13 +94,19 @@ class UpscaleStatusTracker extends ChangeNotifier {
   /// 任务进入队列（等待排队）。同一 key 已存在时不重复计入。
   void enqueue(String key, String label, String modelId, {String? context}) {
     final existing = _jobs[key];
-    if (existing != null && existing.status == UpscaleJobStatus.failed) {
-      // 失败后重试同页：重置状态
+    if (existing != null &&
+        existing.status != UpscaleJobStatus.queued &&
+        existing.status != UpscaleJobStatus.processing) {
       existing
         ..status = UpscaleJobStatus.queued
         ..progress = 0
         ..error = null
-        ..finishedAt = null;
+        ..finishedAt = null
+        ..backendName = null
+        ..elapsed = null
+        ..outputWidth = null
+        ..outputHeight = null
+        ..retryAction = null;
       _cancelClearTimer(key);
       notifyListeners();
       return;
@@ -127,15 +144,45 @@ class UpscaleStatusTracker extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setDetails(
+    String key, {
+    String? backendName,
+    Duration? elapsed,
+    int? outputWidth,
+    int? outputHeight,
+  }) {
+    final job = _jobs[key];
+    if (job == null) return;
+    job
+      ..backendName = backendName ?? job.backendName
+      ..elapsed = elapsed ?? job.elapsed
+      ..outputWidth = outputWidth ?? job.outputWidth
+      ..outputHeight = outputHeight ?? job.outputHeight;
+    notifyListeners();
+  }
+
+  void setRetryAction(String key, VoidCallback retryAction) {
+    final job = _jobs[key];
+    if (job == null) return;
+    job.retryAction = retryAction;
+  }
+
   /// 任务完成（成功 / 跳过 / 失败）
-  void finish(String key,
-      {bool success = true, bool skipped = false, String? error}) {
+  void finish(
+    String key, {
+    bool success = true,
+    bool skipped = false,
+    bool cancelled = false,
+    String? error,
+  }) {
     final job = _jobs[key];
     if (job == null) {
       return;
     }
     job
-      ..status = skipped
+      ..status = cancelled
+          ? UpscaleJobStatus.cancelled
+          : skipped
           ? UpscaleJobStatus.skipped
           : (success ? UpscaleJobStatus.done : UpscaleJobStatus.failed)
       ..progress = success ? 1.0 : job.progress
@@ -143,7 +190,7 @@ class UpscaleStatusTracker extends ChangeNotifier {
       ..finishedAt = DateTime.now();
     final retention = skipped
         ? doneRetention
-        : (success ? doneRetention : failedRetention);
+        : (cancelled || success ? doneRetention : failedRetention);
     _clearTimers[key]?.cancel();
     _clearTimers[key] = Timer(retention, () {
       _jobs.remove(key);
@@ -172,7 +219,9 @@ class UpscaleStatusTracker extends ChangeNotifier {
     DateTime? oldestTime;
     for (final e in _jobs.entries) {
       if (e.value.status == UpscaleJobStatus.done ||
-          e.value.status == UpscaleJobStatus.failed) {
+          e.value.status == UpscaleJobStatus.failed ||
+          e.value.status == UpscaleJobStatus.skipped ||
+          e.value.status == UpscaleJobStatus.cancelled) {
         final t = e.value.finishedAt ?? e.value.enqueuedAt;
         if (oldestTime == null || t.isBefore(oldestTime)) {
           oldest = e.key;

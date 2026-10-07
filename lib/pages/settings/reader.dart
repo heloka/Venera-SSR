@@ -20,7 +20,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
   bool _isChapterCommentsAtEndSupported() {
     String? readerMode;
     bool? showChapterComments;
-    
+
     if (widget.comicId != null &&
         widget.comicSource != null &&
         appdata.settings.isComicSpecificSettingsEnabled(
@@ -41,18 +41,18 @@ class _ReaderSettingsState extends State<ReaderSettings> {
       readerMode = appdata.settings['readerMode'] as String?;
       showChapterComments = appdata.settings['showChapterComments'] as bool?;
     }
-    
+
     // Must have showChapterComments enabled and be in gallery mode
     if (showChapterComments != true) return false;
-    
+
     return readerMode == 'galleryLeftToRight' ||
         readerMode == 'galleryRightToLeft';
   }
-  
+
   void _onShowChapterCommentsChanged() {
     // When showChapterComments is turned off, also turn off showChapterCommentsAtEnd
     bool? showChapterComments;
-    
+
     if (widget.comicId != null &&
         widget.comicSource != null &&
         appdata.settings.isComicSpecificSettingsEnabled(
@@ -78,7 +78,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         appdata.settings['showChapterCommentsAtEnd'] = false;
       }
     }
-    
+
     setState(() {});
     widget.onChanged?.call("showChapterComments");
   }
@@ -155,34 +155,42 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           comicId: isEnabledSpecificSettings ? widget.comicId : null,
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
         ).toSliver(),
-        _SwitchSetting(
-          title: "Enable Anime4K".tl,
-          titleStyle: TextStyle(color: context.colorScheme.primary),
-          settingKey: "enableAnime4K",
-          onChanged: () {
-            PaintingBinding.instance.imageCache.clear();
-            ComicImage.clear();
-            widget.onChanged?.call("enableAnime4K");
-          },
-          comicId: isEnabledSpecificSettings ? widget.comicId : null,
-          comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
-        ).toSliver(),
-        SelectSetting(
-          title: "Anime4K Version".tl,
-          help: "v4 uses AI models (ONNX), requires model download; v1 works offline".tl,
-          settingKey: "anime4KVersion",
-          optionTranslation: {
-            "v1": "v1 (CPU)".tl,
-            "v4": "v4 (AI)".tl,
-          },
-          onChanged: () {
-            PaintingBinding.instance.imageCache.clear();
-            ComicImage.clear();
-            widget.onChanged?.call("anime4KVersion");
-          },
-          comicId: isEnabledSpecificSettings ? widget.comicId : null,
-          comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
-        ).toSliver(),
+        if (App.isWindows)
+          SliverToBoxAdapter(
+            child: WindowsUpscaleSettingsPanel(
+              comicId: isEnabledSpecificSettings ? comicId : null,
+              sourceKey: isEnabledSpecificSettings ? sourceKey : null,
+            ),
+          )
+        else ...[
+          _SwitchSetting(
+            title: "Enable Anime4K".tl,
+            titleStyle: TextStyle(color: context.colorScheme.primary),
+            settingKey: "enableAnime4K",
+            onChanged: () {
+              PaintingBinding.instance.imageCache.clear();
+              ComicImage.clear();
+              widget.onChanged?.call("enableAnime4K");
+            },
+            comicId: isEnabledSpecificSettings ? widget.comicId : null,
+            comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+          ).toSliver(),
+          SelectSetting(
+            title: "Anime4K Version".tl,
+            help:
+                "v4 uses AI models (ONNX), requires model download; v1 works offline"
+                    .tl,
+            settingKey: "anime4KVersion",
+            optionTranslation: {"v1": "v1 (CPU)".tl, "v4": "v4 (AI)".tl},
+            onChanged: () {
+              PaintingBinding.instance.imageCache.clear();
+              ComicImage.clear();
+              widget.onChanged?.call("anime4KVersion");
+            },
+            comicId: isEnabledSpecificSettings ? widget.comicId : null,
+            comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+          ).toSliver(),
+        ],
         _SwitchSetting(
           title: "Enable Colorization(AI上色)".tl,
           titleStyle: TextStyle(

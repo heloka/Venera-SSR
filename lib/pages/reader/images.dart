@@ -155,7 +155,13 @@ class _GalleryModeState extends State<_GalleryMode>
     implements _ImageViewController {
   late PageController controller;
 
-  int get preCacheCount => appdata.settings["preloadImageCount"];
+  int get preCacheCount => App.isWindows
+      ? RealCuganUpscaler.preloadCount(
+          reader.cid,
+          reader.type.sourceKey,
+          appdata.settings["preloadImageCount"],
+        )
+      : appdata.settings["preloadImageCount"];
 
   var photoViewControllers = <int, PhotoViewController>{};
 
@@ -371,7 +377,8 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
         onPageChanged: (i) {
           if (i == 0) {
-            if (reader.isFirstChapterOfGroup || !reader.toPrevChapter(toLastPage: true)) {
+            if (reader.isFirstChapterOfGroup ||
+                !reader.toPrevChapter(toLastPage: true)) {
               controller.jumpToPage(1);
             }
           } else if (i == totalPages + 1) {
@@ -668,7 +675,13 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   late List<bool> cached;
 
-  int get preCacheCount => appdata.settings["preloadImageCount"];
+  int get preCacheCount => App.isWindows
+      ? RealCuganUpscaler.preloadCount(
+          reader.cid,
+          reader.type.sourceKey,
+          appdata.settings["preloadImageCount"],
+        )
+      : appdata.settings["preloadImageCount"];
 
   /// Whether the user was scrolling the page.
   /// The gesture detector has a delay to detect tap event.
@@ -1213,7 +1226,7 @@ ImageProvider _createImageProviderFromKey(
     reader.type.comicSource?.key,
     reader.cid,
     reader.eid,
-    reader.page,
+    page,
     compareOriginal: _upscaleShowOriginal.value,
   );
 }

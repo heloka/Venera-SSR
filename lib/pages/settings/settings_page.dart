@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -25,6 +26,9 @@ import 'package:venera/utils/translations.dart';
 import 'package:venera/utils/anime4k/anime4k_service.dart';
 import 'package:venera/utils/anime4k/anime4k_v4_model_manager.dart';
 import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
+import 'package:venera/utils/anime4k/upscale_models.dart';
+import 'package:venera/utils/anime4k/upscale_status_tracker.dart';
+import 'package:venera/utils/anime4k/realcugan_upscaler.dart';
 import 'package:venera/utils/colorization/colorization_processor.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 import 'package:venera/pages/reader/reader.dart';
@@ -66,9 +70,9 @@ class _SettingsPageState extends State<SettingsPage> {
     "APP",
     "Network",
     "About",
-    "Anime4K",
+    App.isWindows ? "Upscale Settings" : "Anime4K",
     "Colorization",
-    "Debug"
+    "Debug",
   ];
 
   final icons = <IconData>[
@@ -92,20 +96,14 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      child: buildBody(),
-    );
+    return Material(child: buildBody());
   }
 
   Widget buildBody() {
     if (enableTwoViews) {
       return Row(
         children: [
-          SizedBox(
-            width: 280,
-            height: double.infinity,
-            child: buildLeft(),
-          ),
+          SizedBox(width: 280, height: double.infinity, child: buildLeft()),
           Container(
             height: double.infinity,
             decoration: BoxDecoration(
@@ -149,7 +147,7 @@ class _SettingsPageState extends State<SettingsPage> {
               },
               child: buildRight(),
             ),
-          )
+          ),
         ],
       );
     } else {
@@ -161,37 +159,26 @@ class _SettingsPageState extends State<SettingsPage> {
     return Material(
       child: Column(
         children: [
-          SizedBox(
-            height: MediaQuery.of(context).padding.top,
-          ),
+          SizedBox(height: MediaQuery.of(context).padding.top),
           SizedBox(
             height: 56,
-            child: Row(children: [
-              const SizedBox(
-                width: 8,
-              ),
-              Tooltip(
-                message: "Back",
-                child: IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  onPressed: context.pop,
+            child: Row(
+              children: [
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: "Back",
+                  child: IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: context.pop,
+                  ),
                 ),
-              ),
-              const SizedBox(
-                width: 24,
-              ),
-              Text(
-                "Settings".tl,
-                style: ts.s20,
-              )
-            ]),
+                const SizedBox(width: 24),
+                Text("Settings".tl, style: ts.s20),
+              ],
+            ),
           ),
-          const SizedBox(
-            height: 4,
-          ),
-          Expanded(
-            child: buildCategories(),
-          )
+          const SizedBox(height: 4),
+          Expanded(child: buildCategories()),
         ],
       ),
     );
@@ -216,16 +203,15 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
         ),
-        child: Row(children: [
-          Icon(icons[id]),
-          const SizedBox(width: 16),
-          Text(
-            name,
-            style: ts.s16,
-          ),
-          const Spacer(),
-          if (selected) const Icon(Icons.arrow_right)
-        ]),
+        child: Row(
+          children: [
+            Icon(icons[id]),
+            const SizedBox(width: 16),
+            Text(name, style: ts.s16),
+            const Spacer(),
+            if (selected) const Icon(Icons.arrow_right),
+          ],
+        ),
       );
 
       return Padding(
@@ -280,7 +266,7 @@ class _SettingsPageState extends State<SettingsPage> {
       7 => const Anime4KSettings(),
       8 => const ColorizationSettings(),
       9 => const DebugPage(),
-      _ => throw UnimplementedError()
+      _ => throw UnimplementedError(),
     };
   }
 }
@@ -291,9 +277,7 @@ class _SettingsDetailPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      child: _buildPage(),
-    );
+    return Material(child: _buildPage());
   }
 
   Widget _buildPage() {
@@ -308,7 +292,7 @@ class _SettingsDetailPage extends StatelessWidget {
       7 => const Anime4KSettings(),
       8 => const ColorizationSettings(),
       9 => const DebugPage(),
-      _ => throw UnimplementedError()
+      _ => throw UnimplementedError(),
     };
   }
 }

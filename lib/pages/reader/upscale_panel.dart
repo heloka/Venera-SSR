@@ -9,11 +9,81 @@ final ValueNotifier<bool> _upscaleShowOriginal = ValueNotifier(false);
 /// 打开超分任务面板（左下角状态胶囊入口）：
 /// 各页排队/处理/完成状态 + 当前页原图对比开关。
 void _showUpscaleJobsPanel(BuildContext context) {
-  showSideBar(
-    context,
-    const _UpscaleJobsPanel(),
-    width: 400,
-  );
+  showSideBar(context, const _UpscaleJobsPanel(), width: 400);
+}
+
+void _refreshReaderImages() {
+  PaintingBinding.instance.imageCache.clear();
+  ComicImage.clear();
+}
+
+class _WindowsUpscaleControls extends StatelessWidget {
+  const _WindowsUpscaleControls();
+
+  @override
+  Widget build(BuildContext context) {
+    final reader = context.reader;
+    final comicId = reader.cid;
+    final sourceKey = reader.type.sourceKey;
+    return Material(
+      color: context.colorScheme.surface.toOpacity(0.92),
+      borderRadius: BorderRadius.circular(22),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ValueListenableBuilder<int>(
+            valueListenable: RealCuganUpscaler.configChanges,
+            builder: (context, _, __) => Switch.adaptive(
+              value: RealCuganUpscaler.currentConfig(
+                comicId,
+                sourceKey,
+              ).enabled,
+              activeThumbColor: context.colorScheme.primary,
+              onChanged: (enabled) async {
+                final current = await RealCuganUpscaler.loadConfig(
+                  comicId: comicId,
+                  sourceKey: sourceKey,
+                );
+                await RealCuganUpscaler.saveConfig(
+                  current.copyWith(enabled: enabled),
+                  comicId: comicId,
+                  sourceKey: sourceKey,
+                );
+                _refreshReaderImages();
+                if (context.mounted) context.reader.update();
+              },
+            ),
+          ),
+          ValueListenableBuilder<bool>(
+            valueListenable: _upscaleShowOriginal,
+            builder: (context, compareOriginal, _) => IconButton(
+              tooltip: compareOriginal
+                  ? 'Show Upscaled'.tl
+                  : 'Compare Original'.tl,
+              icon: Icon(compareOriginal ? Icons.auto_awesome : Icons.compare),
+              onPressed: () {
+                _upscaleShowOriginal.value = !compareOriginal;
+                context.reader.update();
+              },
+            ),
+          ),
+          IconButton(
+            tooltip: 'Upscale Settings'.tl,
+            icon: const Icon(Icons.tune),
+            onPressed: () => context.to(
+              () => const SettingsPage(initialPage: 7),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Upscale Tasks'.tl,
+            icon: const Icon(Icons.memory),
+            onPressed: () => _showUpscaleJobsPanel(context),
+          ),
+          const _UpscaleStatusPill(),
+        ],
+      ),
+    );
+  }
 }
 
 class _UpscaleJobsPanel extends StatelessWidget {
@@ -65,7 +135,8 @@ class _UpscaleJobsPanel extends StatelessWidget {
                         child: Text(
                           "No upscale tasks yet".tl,
                           style: TextStyle(
-                              color: context.colorScheme.onSurfaceVariant),
+                            color: context.colorScheme.onSurfaceVariant,
+                          ),
                         ),
                       )
                     : ListView.separated(
@@ -78,13 +149,36 @@ class _UpscaleJobsPanel extends StatelessWidget {
                           return ListTile(
                             leading: _jobIcon(context, job),
                             title: Text(job.label),
-                            subtitle: Text(_jobSubtitle(job)),
-                            trailing: job.error == null
+                            subtitle: Text(
+                              _jobSubtitle(job),
+                              maxLines: 4,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing:
+                                job.status == UpscaleJobStatus.failed &&
+                                    RealCuganUpscaler.instance
+                                        .hasRetry(entry.key)
+                                ? IconButton(
+                                    tooltip: 'Retry'.tl,
+                                    onPressed: () async {
+                                      final success =
+                                          await RealCuganUpscaler.instance
+                                              .retry(entry.key);
+                                      if (success && context.mounted) {
+                                        _refreshReaderImages();
+                                        context.reader.update();
+                                      }
+                                    },
+                                    icon: const Icon(Icons.refresh),
+                                  )
+                                : job.error == null
                                 ? null
                                 : Tooltip(
                                     message: job.error!,
-                                    child: const Icon(Icons.error_outline,
-                                        color: Colors.redAccent),
+                                    child: const Icon(
+                                      Icons.error_outline,
+                                      color: Colors.redAccent,
+                                    ),
                                   ),
                           );
                         },
@@ -110,29 +204,49 @@ class _UpscaleJobsPanel extends StatelessWidget {
       case UpscaleJobStatus.done:
         return const Icon(Icons.check_circle, color: Colors.green);
       case UpscaleJobStatus.skipped:
-        return Icon(Icons.image_not_supported_outlined,
-            color: context.colorScheme.onSurfaceVariant);
+        return Icon(
+          Icons.image_not_supported_outlined,
+          color: context.colorScheme.onSurfaceVariant,
+        );
       case UpscaleJobStatus.failed:
         return const Icon(Icons.error, color: Colors.redAccent);
+      case UpscaleJobStatus.cancelled:
+        return Icon(
+          Icons.cancel_outlined,
+          color: context.colorScheme.onSurfaceVariant,
+        );
     }
   }
 
   String _jobSubtitle(UpscaleJob job) {
-    final model = job.modelId == 'v1'
+    final model = job.modelId.startsWith('Real-CUGAN')
+        ? job.modelId
+        : job.modelId == 'v1'
         ? "v1 (CPU)".tl
         : UpscaleModels.byId(job.modelId).displayName;
-    final elapsed = DateTime.now().difference(job.enqueuedAt).inSeconds;
+    final elapsed = job.elapsed == null
+        ? '${DateTime.now().difference(job.enqueuedAt).inSeconds}s'
+        : '${job.elapsed!.inMilliseconds}ms';
+    final backend = job.backendName == null ? '' : ' · ${job.backendName}';
+    final dimensions = job.outputWidth == null || job.outputHeight == null
+        ? ''
+        : ' · ${job.outputWidth}×${job.outputHeight}';
     switch (job.status) {
       case UpscaleJobStatus.queued:
         return "${'Waiting in queue'.tl} · $model";
       case UpscaleJobStatus.processing:
-        return "${'Upscaling'.tl} ${(job.progress * 100).toStringAsFixed(0)}% · $model";
+        final progress = job.progress > 0
+            ? ' ${(job.progress * 100).toStringAsFixed(0)}%'
+            : '';
+        return "${'Upscaling'.tl}$progress · $model$backend";
       case UpscaleJobStatus.done:
-        return "${'Processed'.tl} · $model · ${elapsed}s";
+        return "${'Processed'.tl} · $model$backend · $elapsed$dimensions";
       case UpscaleJobStatus.skipped:
         return "${'Skipped'.tl} · ${job.error ?? ''}";
       case UpscaleJobStatus.failed:
-        return "${'Failed'.tl} · $model";
+        return "${'Failed'.tl} · $model${job.error == null ? '' : ' · ${job.error}'}";
+      case UpscaleJobStatus.cancelled:
+        return "${'Cancelled'.tl} · $model";
     }
   }
 }
@@ -152,14 +266,19 @@ class _UpscaleStatusPill extends StatelessWidget {
         final active = tracker.activeCount;
         final processing = active - tracker.queuedCount;
         final settled = tracker.snapshot
-            .where((e) =>
-                (e.value.status == UpscaleJobStatus.done ||
-                 e.value.status == UpscaleJobStatus.skipped) &&
-                e.value.finishedAt != null &&
-                DateTime.now().difference(e.value.finishedAt!) <
-                    UpscaleStatusTracker.doneRetention)
+            .where(
+              (e) =>
+                  (e.value.status == UpscaleJobStatus.done ||
+                      e.value.status == UpscaleJobStatus.skipped) &&
+                  e.value.finishedAt != null &&
+                  DateTime.now().difference(e.value.finishedAt!) <
+                      UpscaleStatusTracker.doneRetention,
+            )
             .length;
-        final visible = active > 0 || settled > 0;
+        final failed = tracker.snapshot
+            .where((entry) => entry.value.status == UpscaleJobStatus.failed)
+            .length;
+        final visible = active > 0 || settled > 0 || failed > 0;
         return AnimatedOpacity(
           opacity: visible ? 1 : 0,
           duration: const Duration(milliseconds: 300),
@@ -172,8 +291,10 @@ class _UpscaleStatusPill extends StatelessWidget {
                 borderRadius: BorderRadius.circular(16),
                 onTap: () => _showUpscaleJobsPanel(context),
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -193,11 +314,25 @@ class _UpscaleStatusPill extends StatelessWidget {
                           style: const TextStyle(fontSize: 12),
                         ),
                       ] else if (settled > 0) ...[
-                        const Icon(Icons.check_circle,
-                            color: Colors.green, size: 15),
+                        const Icon(
+                          Icons.check_circle,
+                          color: Colors.green,
+                          size: 15,
+                        ),
                         const SizedBox(width: 6),
                         Text(
                           "${'Processed'.tl} $settled",
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ] else if (failed > 0) ...[
+                        const Icon(
+                          Icons.error_outline,
+                          color: Colors.redAccent,
+                          size: 15,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          "Failed".tl + " $failed",
                           style: const TextStyle(fontSize: 12),
                         ),
                       ],

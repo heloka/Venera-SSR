@@ -1,7 +1,7 @@
 # 交接文档：Venera-SSR AI 超分功能改造（2026-10-07）
 
-> 写给下一个接手的 AI / 开发者。本文档自包含：背景、全部改动、架构、关键坑、
-> 验证方法、当前状态与未完成事项。读完本文即可继续开发，无需考古聊天记录。
+> 写给下一个接手的 AI / 开发者。§1–§9 记录旧版本的 ONNX 实现；当前 Windows
+> 实现、参数、迁移与交付状态以 §10 为准。
 
 ---
 
@@ -216,3 +216,47 @@ curl -s https://api.github.com/repos/heloka/Venera-SSR/actions/runs?per_page=5
 `Compare Original` / `Output Scale` / `Max Input Edge` / `Native` / `Downscaled` /
 `Waiting in queue` / `Upscaling` / `Processed` / `Skipped` / `Failed` / `Queued` /
 `Unlimited` / `No upscale tasks yet` 等，以及 6 个模型 description 全文。
+
+## 10. 当前 Windows 实现：Real-CUGAN Vulkan（2.1.6）
+
+本节覆盖旧 Windows ONNX/CPU 说明。Flutter 版本仍固定为 3.38.5。
+
+### 引擎、模型和依赖
+
+- Windows 默认后端为 `realcugan-ncnn-vulkan 20220728`，随便携包放在 exe 旁的
+  `upscale/` 目录。该后端调用 Vulkan；不需要 Python、CUDA 或 PyTorch。
+- 上游发行 ZIP 的 SHA-256 固定为
+  `c6e08d46c11704b1e3a1ada9ddd591cb5005f52f132136c8633ba25def400e01`。
+  `scripts/prepare_windows_upscale.ps1` 校验哈希、SE/Pro 权重、`vcomp140.dll` 和许可证，
+  然后生成与应用校验值匹配的 `realcugan-manifest.json`。
+- 默认模型是 SE、2×、`-1` 保守降噪、关闭 TTA、GPU 编号 0。SE 支持 2×/3×/4×；
+  Pro 支持 2×/3×。降噪按型号能力限制，接缝同步默认快速；GPU 任务串行。
+- GPU 初始化失败时显示原图和具体错误，不回退 CPU。旧 ONNX 模型仍在“高级 CPU 模型”中，
+  仅作为兼容入口，标签明确标记 CPU。
+
+### 配置、阅读器与缓存
+
+- `upscaleConfig` 是 Windows 超分配置快照，`upscaleConfigVulkanMigration: 1` 记录一次性迁移。
+  迁移保留旧开关、长边上限（0 表示不限制）、旧 ONNX 模型选择和漫画专属覆盖；
+  新模型默认切换到 Real-CUGAN SE。每个任务固定使用提交时的配置。
+- 阅读器底栏提供超分开关、原图对比、设置入口和任务状态。对比只绕过超分，仍运行自定义图片
+  处理及上色；关闭超分后仍可进入设置。漫画专属配置跟随阅读器当前漫画/来源。
+- 缓存键包含引擎版本、输出参数、图片身份及源图片 SHA-256；结果是 PNG，配置之间隔离，
+  写入采用临时文件原子替换，缓存上限 5 GiB。
+- GPU 显存不足时，自动减小分块重试一次；单次进程最多 5 分钟。取消章节/设置变更任务，
+  失败任务可在任务面板重试。面板记录实际 GPU 名称、耗时和输出尺寸。
+- 参数面板支持 TTA、降噪、接缝同步、分块、混合比例、GPU 编号、输入长边限制和提前处理页数。
+
+### 本机验证和交付
+
+- 本机 RX 9070 XT 的实测使用了 `-g 0`，日志显示 `[0 AMD Radeon RX 9070 XT]`：
+  Real-CUGAN SE 和 Pro 在同一漫画页分别约 1.3 秒和 1.0 秒，输出 1668×2400。
+  这验证了引擎能使用本机 Vulkan GPU；不是应用便携包的最终验收。
+- Windows 构建机运行 `flutter analyze`、`flutter test`、`flutter build windows --release`，
+  再下载并校验固定版本的 Real-CUGAN 并打包。当前本机 VS 组件缺 CMake 和 Windows SDK，
+  因此 Windows 最终构建需以 GitHub Actions 成功产物为准。
+- 当前版本为 `2.1.6+216`。推送提交及 GitHub Actions run/artifact 链接：待实现、验证并推送后补录。
+- 首次启动新版前备份 `%APPDATA%\com.github.wgh136\venera` 内的用户配置；安装目录应使用
+  `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-windows`，不要覆盖 v2.1.5。
+- 当前不能声称已用新版便携包完成真实阅读验收。需在 RX 9070 XT 上验证所有 SE/Pro 倍率、
+  中文路径、透明/奇数尺寸、显存不足恢复、开关/对比和缓存复用，并对照 exmanga。

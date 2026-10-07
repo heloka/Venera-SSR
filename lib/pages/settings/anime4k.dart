@@ -1,5 +1,344 @@
 part of 'settings_page.dart';
 
+class WindowsUpscaleSettingsPanel extends StatefulWidget {
+  const WindowsUpscaleSettingsPanel({this.comicId, this.sourceKey, super.key});
+
+  final String? comicId;
+  final String? sourceKey;
+
+  @override
+  State<WindowsUpscaleSettingsPanel> createState() =>
+      _WindowsUpscaleSettingsPanelState();
+}
+
+class _WindowsUpscaleSettingsPanelState
+    extends State<WindowsUpscaleSettingsPanel> {
+  UpscaleConfig _config = const UpscaleConfig();
+  bool _ready = false;
+  bool _runtimeAvailable = false;
+  Timer? _saveTimer;
+
+  bool get _isComicSetting =>
+      widget.comicId != null && widget.sourceKey != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final config = await RealCuganUpscaler.loadConfig(
+      comicId: widget.comicId,
+      sourceKey: widget.sourceKey,
+    );
+    final runtime = await RealCuganUpscaler.instance.isRuntimeAvailable();
+    if (!mounted) return;
+    setState(() {
+      _config = config;
+      _runtimeAvailable = runtime;
+      _ready = true;
+    });
+  }
+
+  Future<void> _save(UpscaleConfig config, {bool debounce = false}) async {
+    final normalized = UpscaleConfig.fromJson(config.toJson());
+    _saveTimer?.cancel();
+    if (mounted) setState(() => _config = normalized);
+    if (debounce) {
+      _saveTimer = Timer(
+        const Duration(milliseconds: 250),
+        () => unawaited(_persist(normalized)),
+      );
+      return;
+    }
+    await _persist(normalized);
+  }
+
+  Future<void> _persist(UpscaleConfig config) async {
+    await RealCuganUpscaler.saveConfig(
+      config,
+      comicId: widget.comicId,
+      sourceKey: widget.sourceKey,
+    );
+    PaintingBinding.instance.imageCache.clear();
+    ComicImage.clear();
+  }
+
+  @override
+  void dispose() {
+    if (_saveTimer?.isActive == true) {
+      _saveTimer!.cancel();
+      unawaited(_persist(_config));
+    }
+    super.dispose();
+  }
+
+  Future<void> _selectLegacyModel(String modelId) async {
+    await Anime4KV4Service.instance.setModel(modelId);
+    appdata.settings['anime4KVersion'] = 'v4';
+    appdata.settings['anime4KV4Model'] = modelId;
+    await _save(
+      _config.copyWith(modelId: 'legacy:$modelId', legacyModelId: modelId),
+    );
+  }
+
+  Widget _section(String title, Widget content) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        content,
+      ],
+    ),
+  );
+
+  Widget _choices(
+    String title,
+    List<int> choices,
+    int value,
+    ValueChanged<int> onChange, {
+    String Function(int value)? label,
+  }) => _section(
+    title,
+    Wrap(
+      spacing: 8,
+      runSpacing: 4,
+      children: [
+        for (final choice in choices)
+          ChoiceChip(
+            label: Text(label?.call(choice) ?? '$choice'),
+            selected: value == choice,
+            onSelected: (_) => onChange(choice),
+          ),
+      ],
+    ),
+  );
+
+  Widget _slider(
+    String title,
+    int value,
+    int max,
+    String unit,
+    void Function(int value, bool isFinal) onChange,
+  ) => _section(
+    '$title: $value$unit',
+    Slider(
+      value: value.toDouble(),
+      min: 0,
+      max: max.toDouble(),
+      divisions: max,
+      onChanged: (value) => onChange(value.round(), false),
+      onChangeEnd: (value) => onChange(value.round(), true),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_ready) return const Center(child: CircularProgressIndicator());
+    final scales = _config.supportedScales;
+    final legacyModels = UpscaleModels.all;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SwitchListTile(
+          title: Text('Enable Upscaling'.tl),
+          value: _config.enabled,
+          onChanged: (enabled) => _save(_config.copyWith(enabled: enabled)),
+        ),
+        _section(
+          'AI Upscale'.tl,
+          Text(
+            _config.isLegacy
+                ? UpscaleModels.byId(_config.selectedModelId).displayName
+                : _config.displayModel,
+          ),
+        ),
+        _section(
+          'Vulkan GPU Backend'.tl,
+          Row(
+            children: [
+              Icon(
+                _runtimeAvailable ? Icons.check_circle : Icons.error_outline,
+                color: _runtimeAvailable ? Colors.green : Colors.redAccent,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _runtimeAvailable
+                      ? '${'Vulkan GPU'.tl} ${_config.gpuId} · Real-CUGAN 20220728'
+                      : 'Real-CUGAN engine or model missing'.tl,
+                ),
+              ),
+            ],
+          ),
+        ),
+        _section(
+          'Model'.tl,
+          Wrap(
+            spacing: 8,
+            children: [
+              ChoiceChip(
+                label: const Text('Real-CUGAN SE'),
+                selected: _config.modelId == 'real-cugan-se',
+                onSelected: (_) => _save(
+                  _config.copyWith(
+                    modelId: 'real-cugan-se',
+                    scale: 2,
+                    denoise: -1,
+                  ),
+                ),
+              ),
+              ChoiceChip(
+                label: const Text('Real-CUGAN Pro'),
+                selected: _config.modelId == 'real-cugan-pro',
+                onSelected: (_) => _save(
+                  _config.copyWith(
+                    modelId: 'real-cugan-pro',
+                    scale: 2,
+                    denoise: -1,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        _choices(
+          'Output Scale'.tl,
+          scales,
+          _config.scale,
+          (scale) => _save(_config.copyWith(scale: scale, denoise: -1)),
+          label: (scale) => '$scale×',
+        ),
+        if (!_config.isLegacy)
+          _choices(
+            'Denoise Level'.tl,
+            _config.supportedDenoise,
+            _config.denoise,
+            (denoise) => _save(_config.copyWith(denoise: denoise)),
+            label: (value) => switch (value) {
+              -1 => 'Conservative'.tl,
+              0 => 'No Denoise'.tl,
+              _ => '$value',
+            },
+          ),
+        if (!_config.isLegacy) ...[
+          SwitchListTile(
+            title: Text('TTA Flip Upscaling'.tl),
+            value: _config.tta,
+            onChanged: (tta) => _save(_config.copyWith(tta: tta)),
+          ),
+          _choices(
+            'Seam Synchronization'.tl,
+            const [0, 1, 2, 3],
+            _config.syncgap,
+            (syncgap) => _save(_config.copyWith(syncgap: syncgap)),
+            label: (value) => switch (value) {
+              0 => 'Off'.tl,
+              1 => 'Accurate'.tl,
+              2 => 'Rough'.tl,
+              _ => 'Fast'.tl,
+            },
+          ),
+          _choices(
+            'Tile Size'.tl,
+            const [0, 128, 192, 256, 320, 384, 512, 640, 768, 1024],
+            _config.tileSize,
+            (tileSize) => _save(_config.copyWith(tileSize: tileSize)),
+            label: (value) => value == 0 ? 'Auto'.tl : '$value',
+          ),
+          _choices(
+            'GPU Device'.tl,
+            const [0, 1, 2, 3],
+            _config.gpuId,
+            (gpuId) => _save(_config.copyWith(gpuId: gpuId)),
+          ),
+        ],
+        if (!_config.isLegacy) ...[
+          _slider(
+            'Enhanced Image Mix'.tl,
+            _config.mixRatio,
+            100,
+            '%',
+            (mixRatio, isFinal) =>
+                _save(_config.copyWith(mixRatio: mixRatio), debounce: !isFinal),
+          ),
+          _choices(
+            'Max Input Edge'.tl,
+            const [0, 1200, 1600, 2048, 2560, 4096, 8192],
+            _config.maxInputEdge,
+            (maxInputEdge) =>
+                _save(_config.copyWith(maxInputEdge: maxInputEdge)),
+            label: (value) => value == 0 ? 'Unlimited'.tl : '${value}px',
+          ),
+        ],
+        _slider(
+          'Preloaded Pages'.tl,
+          _config.preloadPages,
+          64,
+          '',
+          (preloadPages, isFinal) => _save(
+            _config.copyWith(preloadPages: preloadPages),
+            debounce: !isFinal,
+          ),
+        ),
+        if (!_isComicSetting) ...[
+          _section(
+            'Advanced CPU Models'.tl,
+            Text('Windows legacy ONNX models use the CPU.'.tl),
+          ),
+          _section(
+            'Model'.tl,
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final model in legacyModels)
+                  ChoiceChip(
+                    label: Text(model.displayName),
+                    selected: _config.isLegacy
+                        ? _config.selectedModelId == model.id
+                        : _config.legacyModelId == model.id,
+                    onSelected: (_) => _selectLegacyModel(model.id),
+                  ),
+              ],
+            ),
+          ),
+        ],
+        if (UpscaleStatusTracker.instance.snapshot.isNotEmpty)
+          _section(
+            'Latest Upscale'.tl,
+            Builder(
+              builder: (context) {
+                final job = UpscaleStatusTracker.instance.snapshot.first.value;
+                return Text(
+                  [
+                    job.backendName ?? job.modelId,
+                    if (job.elapsed != null) '${job.elapsed!.inMilliseconds}ms',
+                    if (job.outputWidth != null && job.outputHeight != null)
+                      '${job.outputWidth}×${job.outputHeight}',
+                    if (job.error != null) job.error!,
+                  ].join(' · '),
+                );
+              },
+            ),
+          ),
+        ListTile(
+          title: Text('Clear Upscale Cache'.tl),
+          trailing: const Icon(Icons.delete_sweep),
+          onTap: () async {
+            await RealCuganUpscaler.instance.clearCache();
+            await Anime4KV4Service.instance.clearCache();
+            if (mounted)
+              context.showMessage(message: 'Upscale cache cleared'.tl);
+          },
+        ),
+      ],
+    );
+  }
+}
+
 /// Anime4K 设置页
 ///
 /// 同时管理两个引擎版本：
@@ -51,9 +390,11 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   /// v4 推理后端说明（按平台）
   String get _backendDescription {
     if (App.isAndroid) {
-      return "Backend: ONNX Runtime + NNAPI (GPU), falls back to CPU on failure".tl;
+      return "Backend: ONNX Runtime + NNAPI (GPU), falls back to CPU on failure"
+          .tl;
     }
-    return "Backend: ONNX Runtime (CPU, tiled inference in background isolate)".tl;
+    return "Backend: ONNX Runtime (CPU, tiled inference in background isolate)"
+        .tl;
   }
 
   int get _maxEdge =>
@@ -159,15 +500,13 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     try {
       final xFile = await file_selector.openFile(
         acceptedTypeGroups: <file_selector.XTypeGroup>[
-          file_selector.XTypeGroup(
-            label: 'ONNX Model',
-            extensions: ['onnx'],
-          ),
+          file_selector.XTypeGroup(label: 'ONNX Model', extensions: ['onnx']),
         ],
       );
       if (xFile == null) return;
       if (!xFile.name.toLowerCase().endsWith('.onnx')) {
-        if (mounted) context.showMessage(message: "Please select a .onnx file".tl);
+        if (mounted)
+          context.showMessage(message: "Please select a .onnx file".tl);
         return;
       }
       // Android 经原生 ContentResolver 以 64KB 分块拷贝（不占内存、不拷坏）；
@@ -175,7 +514,10 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
       // 均落到当前选中模型的调用位置（fileName）。
       final uri = xFile.path; // content URI 或真实文件路径
       final dir = await getApplicationSupportDirectory();
-      final targetPath = path.join(dir.path, Anime4KV4ModelManager.modelFileName);
+      final targetPath = path.join(
+        dir.path,
+        Anime4KV4ModelManager.modelFileName,
+      );
       final bakPath = '$targetPath.bak';
       final tempPath = '$targetPath.tmp';
 
@@ -198,7 +540,8 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
           written = await File(tempPath).length();
         }
       } catch (e) {
-        if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
+        if (await File(bakPath).exists())
+          await File(bakPath).rename(targetPath);
         if (mounted) context.showMessage(message: "Failed to copy file: $e".tl);
         return;
       }
@@ -207,8 +550,10 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         try {
           await File(tempPath).delete();
         } catch (_) {}
-        if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
-        if (mounted) context.showMessage(message: "File too small, invalid model".tl);
+        if (await File(bakPath).exists())
+          await File(bakPath).rename(targetPath);
+        if (mounted)
+          context.showMessage(message: "File too small, invalid model".tl);
         return;
       }
 
@@ -260,6 +605,14 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
 
   @override
   Widget build(BuildContext context) {
+    if (App.isWindows) {
+      return SmoothCustomScrollView(
+        slivers: [
+          SliverAppbar(title: Text('Upscale Settings'.tl)),
+          SliverToBoxAdapter(child: WindowsUpscaleSettingsPanel()),
+        ],
+      );
+    }
     final isV4 = _version == 'v4';
     return SmoothCustomScrollView(
       slivers: [
@@ -411,19 +764,25 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
               child: Wrap(
                 spacing: 8,
                 runSpacing: 4,
-                children: Anime4KV4ModelManager.selectedDef
+                children: Anime4KV4ModelManager
+                    .selectedDef
                     .supportedOutputScales
-                    .map((s) => ChoiceChip(
-                          label: Text(s == Anime4KV4ModelManager.selectedDef.scale
+                    .map(
+                      (s) => ChoiceChip(
+                        label: Text(
+                          s == Anime4KV4ModelManager.selectedDef.scale
                               ? "$s× (${'Native'.tl})"
-                              : "$s× (${'Downscaled'.tl})"),
-                          selected:
-                              resolveOutputScale(
-                                  Anime4KV4ModelManager.selectedDef,
-                                  _rawScale) ==
-                              s,
-                          onSelected: (_) => _setScale(s),
-                        ))
+                              : "$s× (${'Downscaled'.tl})",
+                        ),
+                        selected:
+                            resolveOutputScale(
+                              Anime4KV4ModelManager.selectedDef,
+                              _rawScale,
+                            ) ==
+                            s,
+                        onSelected: (_) => _setScale(s),
+                      ),
+                    )
                     .toList(),
               ),
             ),
@@ -434,7 +793,8 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
               child: Text(
-                "Pages longer than this keep the original image (upscale skipped)".tl,
+                "Pages longer than this keep the original image (upscale skipped)"
+                    .tl,
                 style: TextStyle(
                   color: context.colorScheme.onSurfaceVariant,
                   fontSize: 12,
@@ -462,9 +822,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                   ),
                   for (final edge in const [0, 1200, 1600, 2048, 2560])
                     ChoiceChip(
-                      label: Text(edge == 0
-                          ? "Unlimited".tl
-                          : "${edge}px".tl),
+                      label: Text(edge == 0 ? "Unlimited".tl : "${edge}px".tl),
                       selected: _maxEdge == edge,
                       onSelected: (_) {
                         appdata.settings['anime4KV4MaxEdge'] = edge;
@@ -551,7 +909,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                       _isModelDownloaded
                           ? "Model downloaded".tl
                           : "Model not downloaded (~${Anime4KV4ModelManager.selectedDef.sizeHintMB}MB)"
-                              .tl,
+                                .tl,
                       style: TextStyle(
                         color: context.colorScheme.onSurfaceVariant,
                         fontSize: 12,
@@ -578,8 +936,9 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                           if (!_isModelDownloaded)
                             Expanded(
                               child: ElevatedButton.icon(
-                                onPressed:
-                                    _isDownloading ? null : _downloadModel,
+                                onPressed: _isDownloading
+                                    ? null
+                                    : _downloadModel,
                                 icon: _isDownloading
                                     ? const SizedBox(
                                         width: 16,
@@ -630,7 +989,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                       _usingCustom
                           ? "Using: ${_customModelName ?? 'custom model'}".tl
                           : "Select a local .onnx model to override the built-in one"
-                              .tl,
+                                .tl,
                       style: TextStyle(
                         color: context.colorScheme.onSurfaceVariant,
                         fontSize: 12,
@@ -677,12 +1036,12 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ),
           ),
           ..._modelUrls.asMap().entries.map(
-                (e) => _MirrorUrlTile(
-                  index: e.key,
-                  url: e.value,
-                  onDelete: _removeMirrorUrl,
-                ),
-              ),
+            (e) => _MirrorUrlTile(
+              index: e.key,
+              url: e.value,
+              onDelete: _removeMirrorUrl,
+            ),
+          ),
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -715,4 +1074,3 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     );
   }
 }
-
