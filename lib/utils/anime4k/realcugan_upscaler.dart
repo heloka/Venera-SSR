@@ -521,6 +521,7 @@ class RealCuganUpscaler {
             return;
           }
         await _writeAtomic(output, result);
+        await _recordStage('cache-written');
         await _pruneCache();
         _retryRequests.remove(requestId);
         completion.complete(result);
@@ -599,9 +600,11 @@ class RealCuganUpscaler {
       height: original.height,
       numChannels: 3,
     );
+    var hasTransparency = false;
     for (var y = 0; y < original.height; y++) {
       for (var x = 0; x < original.width; x++) {
         final pixel = original.getPixel(x, y);
+        if (pixel.a < 255) hasTransparency = true;
         input.setPixelRgb(x, y, pixel.r, pixel.g, pixel.b);
       }
     }
@@ -673,23 +676,33 @@ class RealCuganUpscaler {
       if (result.exitCode != 0 || !await outputFile.exists()) {
         throw _UpscaleException(_explainFailure(diagnostic, config.gpuId));
       }
+      await _recordStage('engine-exited');
       final outputBytes = await outputFile.readAsBytes();
       final outputWidth = original.width * config.scale;
       final outputHeight = original.height * config.scale;
       if (!_hasPngDimensions(outputBytes, outputWidth, outputHeight)) {
         throw const _UpscaleException('Real-CUGAN 输出尺寸不正确。');
       }
+      await _recordStage(
+        'png-validated; transparent=$hasTransparency; mix=${config.mixRatio}',
+      );
       final Uint8List encoded;
-      if (config.mixRatio == 100 && !original.hasAlpha) {
+      if (config.mixRatio == 100 && !hasTransparency) {
         encoded = outputBytes;
       } else {
         final enhanced = img.decodeImage(outputBytes);
         if (enhanced == null) {
           throw const _UpscaleException('Real-CUGAN 输出图片损坏。');
         }
-        final resultImage = _composeOutput(original, enhanced, config.mixRatio);
+        final resultImage = _composeOutput(
+          original,
+          enhanced,
+          config.mixRatio,
+          preserveAlpha: hasTransparency,
+        );
         encoded = Uint8List.fromList(img.encodePng(resultImage, level: 3));
       }
+      await _recordStage('postprocess-complete');
       tracker.setDetails(
         requestId,
         backendName: _extractDevice(diagnostic).isEmpty
@@ -711,15 +724,15 @@ class RealCuganUpscaler {
   static img.Image _composeOutput(
     img.Image original,
     img.Image enhanced,
-    int mixRatio,
-  ) {
+    int mixRatio, {
+    required bool preserveAlpha,
+  }) {
     final width = enhanced.width;
     final height = enhanced.height;
-    final hasAlpha = original.hasAlpha;
     final output = img.Image(
       width: width,
       height: height,
-      numChannels: hasAlpha ? 4 : 3,
+      numChannels: preserveAlpha ? 4 : 3,
     );
     final resized = mixRatio == 100
         ? null
@@ -729,7 +742,7 @@ class RealCuganUpscaler {
             height: height,
             interpolation: img.Interpolation.cubic,
           );
-    final resizedAlpha = hasAlpha
+    final resizedAlpha = preserveAlpha
         ? img.copyResize(
             original,
             width: width,
@@ -755,6 +768,15 @@ class RealCuganUpscaler {
       }
     }
     return output;
+  }
+
+  Future<void> _recordStage(String stage) async {
+    final cachePath = _cachePath;
+    if (cachePath == null) return;
+    await File(path.join(cachePath, 'last-upscale-stage.txt')).writeAsString(
+      '${DateTime.now().toIso8601String()} $stage\n',
+      flush: true,
+    );
   }
 
   static bool _hasPngDimensions(
