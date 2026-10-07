@@ -286,3 +286,19 @@ curl -s https://api.github.com/repos/heloka/Venera-SSR/actions/runs?per_page=5
   热修包并排安装在
   `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-hotfix-8e55379-windows`；未启动应用，
   需由用户验证同一漫画页面能否正常显示。
+
+### 第二轮复测和诊断热修（2026-10-07）
+
+- 用户确认触发动作是开启超分开关后页面处理时闪退。第二轮热修版运行后仍失败；最近三次
+  临时目录均留下完整 `output.png`，但 `upscale-vulkan-v1` 缓存为空。最新输入页再次通过
+  SE GPU 直跑，设备识别为 RX 9070 XT，输出与应用遗留图 SHA-256 完全相同。应用日志仍无
+  Real-CUGAN 错误或阶段记录，Windows 未记录对应的 `venera.exe` 崩溃。
+- 第三版提交 `e0bda49a8b48d6978b952c311b89b3ad92a6b742` 在输入转换时按 alpha 像素实际值判断
+  是否透明；100% 混合且没有透明像素时直接返回引擎 PNG。透明像素仍走保留 alpha 的合成流程。
+  同时将最近阶段同步写入 `upscale-vulkan-v1/last-upscale-stage.txt`：`engine-exited`、
+  `png-validated`、`postprocess-complete`、`cache-written`，用于在进程异常退出后确定最后完成步骤。
+- [第三版 CI](https://github.com/heloka/Venera-SSR/actions/runs/37621075949) 已通过分析、测试、
+  Windows 构建和模型打包。artifact `11482359431`，包 SHA-256：
+  `97faaceb55fef0edac23b64dc270747a1fbadaeccdb7870230e93da9f63cd4b2`。
+  已安装到 `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-diagnostic-e0bda49-windows`，
+  未启动；要验证时应使用该目录中的 `venera.exe`，不要再用前两版 v2.1.6。
