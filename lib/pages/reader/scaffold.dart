@@ -657,7 +657,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     } else {
       appdata.settings[settingKey] = pageCount;
     }
-    await appdata.settings.saveData();
+    await appdata.saveData();
     if (!mounted) return;
     reader.update();
     update();
