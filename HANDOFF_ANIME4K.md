@@ -252,11 +252,17 @@ curl -s https://api.github.com/repos/heloka/Venera-SSR/actions/runs?per_page=5
 - 本机 RX 9070 XT 的实测使用了 `-g 0`，日志显示 `[0 AMD Radeon RX 9070 XT]`：
   Real-CUGAN SE 和 Pro 在同一漫画页分别约 1.3 秒和 1.0 秒，输出 1668×2400。
   这验证了引擎能使用本机 Vulkan GPU；不是应用便携包的最终验收。
-- Windows 构建机运行 `flutter analyze`、`flutter test`、`flutter build windows --release`，
-  再下载并校验固定版本的 Real-CUGAN 并打包。当前本机 VS 组件缺 CMake 和 Windows SDK，
-  因此 Windows 最终构建需以 GitHub Actions 成功产物为准。
-- 当前版本为 `2.1.6+216`。推送提交及 GitHub Actions run/artifact 链接：待实现、验证并推送后补录。
-- 首次启动新版前备份 `%APPDATA%\com.github.wgh136\venera` 内的用户配置；安装目录应使用
-  `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-windows`，不要覆盖 v2.1.5。
-- 当前不能声称已用新版便携包完成真实阅读验收。需在 RX 9070 XT 上验证所有 SE/Pro 倍率、
-  中文路径、透明/奇数尺寸、显存不足恢复、开关/对比和缓存复用，并对照 exmanga。
+- 本次交付提交为 `307f08196aa2e8ba184f9a6307ab93c1ee9ada3e`。GitHub Actions 已通过
+  `flutter analyze`、`flutter test`、Windows Release 构建、引擎/模型暂存及完整性校验。
+  [构建记录](https://github.com/heloka/Venera-SSR/actions/runs/37597661376)；产物为
+  `Venera-Windows-v2.1.6.zip`（artifact `11471632889`）。包 SHA-256：
+  `7469a2fd40ad5cd8252ff4e4b1f7a25ac21912fed9b0b62653c6774d9cca1843`。
+- 已安装到 `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-windows`，未覆盖 v2.1.5。
+  安装包含 `venera.exe`、Real-CUGAN Vulkan 引擎和 SE/Pro 权重；本次未启动应用。
+- 首次启动前已备份 `%APPDATA%\com.github.wgh136\venera` 中的配置文件到
+  `D:\02_Software_Repo\PC_Tools\Venera-SSR-v2.1.6-config-backup-20261007-171606`：
+  `appdata.json`、`implicitData.json`、`shared_preferences.json` 和 `window_placement`。
+  原目录中没有 `syncdata.json`，因此未备份该文件。
+- RX 9070 XT 上已用同一上游引擎直接运行 SE/Pro：日志识别到 GPU，单页分别约 1.3/1.0 秒；
+  这不是新版应用的端到端验收。当前尚未用便携包完成真实漫画阅读测试，也未验证所有倍率、
+  中文路径、透明/奇数尺寸、显存不足恢复、开关/对比和缓存复用；需要在本机继续验收。
