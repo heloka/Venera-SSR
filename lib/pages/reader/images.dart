@@ -1218,8 +1218,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
 ImageProvider _createImageProviderFromKey(
   String imageKey,
   BuildContext context,
-  int page,
-) {
+  int page, {
+  bool skipUpscale = false,
+}) {
   var reader = context.reader;
   return ReaderImageProvider(
     imageKey,
@@ -1228,13 +1229,23 @@ ImageProvider _createImageProviderFromKey(
     reader.eid,
     page,
     compareOriginal: _upscaleShowOriginal.value,
+    skipUpscale: skipUpscale,
   );
 }
 
-ImageProvider _createImageProvider(int page, BuildContext context) {
+ImageProvider _createImageProvider(
+  int page,
+  BuildContext context, {
+  bool skipUpscale = false,
+}) {
   var reader = context.reader;
   var imageKey = reader.images![page - 1];
-  return _createImageProviderFromKey(imageKey, context, page);
+  return _createImageProviderFromKey(
+    imageKey,
+    context,
+    page,
+    skipUpscale: skipUpscale,
+  );
 }
 
 /// [_precacheImage] is used to precache the image for the given page.
@@ -1244,7 +1255,17 @@ void _precacheImage(int page, BuildContext context) {
   if (page <= 0 || page > context.reader.images!.length) {
     return;
   }
-  precacheImage(_createImageProvider(page, context), context);
+  final reader = context.reader;
+  final config = RealCuganUpscaler.currentConfig(
+    reader.cid,
+    reader.type.sourceKey,
+  );
+  final skipUpscale =
+      App.isWindows && config.enabled && !_upscaleShowOriginal.value;
+  precacheImage(
+    _createImageProvider(page, context, skipUpscale: skipUpscale),
+    context,
+  );
 }
 
 /// [_preDownloadImage] is used to download the image for the given page.
