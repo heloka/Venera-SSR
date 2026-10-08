@@ -4,13 +4,13 @@ import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
-import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/io.dart';
+import 'realcugan_image_worker.dart';
 import 'upscale_models.dart';
 import 'upscale_status_tracker.dart';
 
@@ -77,16 +77,18 @@ class UpscaleConfig {
     int? maxInputEdge,
     int? scale,
   }) {
-    final legacyModel = modelId != null &&
-            UpscaleModels.all.any((model) => model.id == modelId)
+    final legacyModel =
+        modelId != null && UpscaleModels.all.any((model) => model.id == modelId)
         ? modelId
         : 'anime4k_x4';
-    return UpscaleConfig.fromJson(UpscaleConfig(
-      enabled: enabled,
-      legacyModelId: legacyModel,
-      maxInputEdge: (maxInputEdge ?? 0).clamp(0, 32768).toInt(),
-      scale: scale ?? 2,
-    ).toJson());
+    return UpscaleConfig.fromJson(
+      UpscaleConfig(
+        enabled: enabled,
+        legacyModelId: legacyModel,
+        maxInputEdge: (maxInputEdge ?? 0).clamp(0, 32768).toInt(),
+        scale: scale ?? 2,
+      ).toJson(),
+    );
   }
 
   bool get isLegacy => modelId.startsWith('legacy:');
@@ -246,6 +248,7 @@ class RealCuganUpscaler {
   static const _version = 1;
   static const _timeout = Duration(minutes: 5);
   static const _maxCacheBytes = 5 * 1024 * 1024 * 1024;
+  static const _maxOutstandingUpscaleJobs = 4;
   static final ValueNotifier<int> configChanges = ValueNotifier(0);
   static UpscaleConfig? _globalConfig;
   static final Map<String, UpscaleConfig> _comicConfigs = {};
@@ -285,7 +288,8 @@ class RealCuganUpscaler {
                 value.containsKey('anime4KV4Model') ||
                 value.containsKey('anime4KV4MaxEdge') ||
                 value.containsKey('anime4KV4Scale'))) {
-          final comicModel = value['anime4KV4Model'] as String? ?? previousModel;
+          final comicModel =
+              value['anime4KV4Model'] as String? ?? previousModel;
           final comicEdge =
               (value['anime4KV4MaxEdge'] as num?)?.toInt() ?? previousEdge;
           final comicScale =
@@ -438,9 +442,9 @@ class RealCuganUpscaler {
     required UpscaleConfig config,
   }) async {
     if (!config.enabled || config.mixRatio == 0) return imageBytes;
+    final generation = _generation;
     await _ensureInitialized();
-    final image = img.decodeImage(imageBytes);
-    if (image == null) throw const _UpscaleException('无法读取原图格式。');
+    if (generation != _generation) return imageBytes;
     final inputDigest = sha256.convert(imageBytes).toString();
     final key = sha256
         .convert(
@@ -448,99 +452,159 @@ class RealCuganUpscaler {
         )
         .toString();
     final requestId = 'vulkan:${config.id}:$cacheKey';
-    if (config.maxInputEdge > 0 &&
-        math.max(image.width, image.height) > config.maxInputEdge) {
+    final existing = _inFlight[key];
+    if (existing != null) return existing;
+
+    if (_inFlight.length >= _maxOutstandingUpscaleJobs) {
+      _rememberRetry(
+        requestId,
+        () => processImage(
+          imageBytes: imageBytes,
+          cacheKey: cacheKey,
+          label: label,
+          config: config,
+        ),
+      );
       UpscaleStatusTracker.instance.enqueue(
         requestId,
         label,
         config.displayModel,
       );
+      UpscaleStatusTracker.instance.setRetryAction(
+        requestId,
+        () => unawaited(_retrySafely(requestId)),
+      );
       UpscaleStatusTracker.instance.finish(
         requestId,
-        skipped: true,
-        error: '原图超过 ${config.maxInputEdge}px 长边限制。',
+        success: false,
+        error: '超分队列已满，当前页暂时显示原图。可以稍后重试。',
       );
       return imageBytes;
     }
-    final output = File(path.join(_cachePath!, '$key.png'));
-    if (await output.exists()) {
-      try {
-        final cachedBytes = await output.readAsBytes();
-        final cachedImage = img.decodeImage(cachedBytes);
-        if (cachedImage != null &&
-            cachedImage.width == image.width * config.scale &&
-            cachedImage.height == image.height * config.scale) {
-          return cachedBytes;
-        }
-      } on Object {
-        await output.deleteIgnoreError();
-      }
-      if (await output.exists()) {
-        await output.deleteIgnoreError();
-      }
-    }
-    final existing = _inFlight[key];
-    if (existing != null) return existing;
 
-    final generation = _generation;
     final completion = Completer<Uint8List>();
     _inFlight[key] = completion.future;
-    UpscaleStatusTracker.instance.enqueue(
-      requestId,
-      label,
-      config.displayModel,
-    );
-    _rememberRetry(
-      requestId,
-      () => processImage(
-        imageBytes: imageBytes,
-        cacheKey: cacheKey,
-        label: label,
-        config: config,
-      ),
-    );
-    UpscaleStatusTracker.instance.setRetryAction(
-      requestId,
-      () => unawaited(_retrySafely(requestId)),
-    );
-    _queue.add(
-      _QueuedTask(requestId, completion, imageBytes, () async {
-        if (generation != _generation) {
-          completion.complete(imageBytes);
-          return;
-        }
+    var queued = false;
+    try {
+      final output = File(path.join(_cachePath!, '$key.png'));
+      if (await output.exists()) {
         try {
-          final result = await _runUpscale(
-            image,
-            config,
-            requestId,
-            generation,
-          );
+          final cachedBytes = await output.readAsBytes();
+          if (generation != _generation) {
+            completion.complete(imageBytes);
+            return imageBytes;
+          }
+          if (await validateRealCuganCache(
+            sourceBytes: imageBytes,
+            cachedBytes: cachedBytes,
+            scale: config.scale,
+          )) {
+            completion.complete(cachedBytes);
+            return cachedBytes;
+          }
+        } on Object {
+          await output.deleteIgnoreError();
+        }
+        if (await output.exists()) {
+          await output.deleteIgnoreError();
+        }
+      }
+      if (generation != _generation) {
+        completion.complete(imageBytes);
+        return imageBytes;
+      }
+      final prepared = await prepareRealCuganImageInput(
+        imageBytes,
+        maxInputEdge: config.maxInputEdge,
+      );
+      if (generation != _generation) {
+        completion.complete(imageBytes);
+        return imageBytes;
+      }
+      if (prepared.png == null) {
+        UpscaleStatusTracker.instance.enqueue(
+          requestId,
+          label,
+          config.displayModel,
+        );
+        UpscaleStatusTracker.instance.finish(
+          requestId,
+          skipped: true,
+          error: '原图超过 ${config.maxInputEdge}px 长边限制。',
+        );
+        completion.complete(imageBytes);
+        return imageBytes;
+      }
+
+      UpscaleStatusTracker.instance.enqueue(
+        requestId,
+        label,
+        config.displayModel,
+      );
+      _rememberRetry(
+        requestId,
+        () => processImage(
+          imageBytes: imageBytes,
+          cacheKey: cacheKey,
+          label: label,
+          config: config,
+        ),
+      );
+      UpscaleStatusTracker.instance.setRetryAction(
+        requestId,
+        () => unawaited(_retrySafely(requestId)),
+      );
+      _queue.add(
+        _QueuedTask(requestId, completion, imageBytes, () async {
           if (generation != _generation) {
             completion.complete(imageBytes);
             return;
           }
-        await _writeAtomic(output, result);
-        await _recordStage('cache-written');
-        await _pruneCache();
-        _retryRequests.remove(requestId);
-        completion.complete(result);
-        } catch (error, stackTrace) {
-          if (!completion.isCompleted) completion.complete(imageBytes);
-          Log.error('RealCugan', '$error\n$stackTrace');
-          UpscaleStatusTracker.instance.finish(
-            requestId,
-            cancelled: error is _CancelledUpscale,
-            success: false,
-            error: error.toString(),
-          );
-        } finally {
-          _inFlight.remove(key);
-        }
-      }),
-    );
-    _runQueue();
-    return completion.future;
+          try {
+            final result = await _runUpscale(
+              prepared,
+              prepared.png!,
+              imageBytes,
+              config,
+              requestId,
+              generation,
+            );
+            if (generation != _generation) {
+              completion.complete(imageBytes);
+              return;
+            }
+            await _writeAtomic(output, result);
+            await _recordStage('cache-written');
+            await _pruneCache();
+            _retryRequests.remove(requestId);
+            completion.complete(result);
+          } catch (error, stackTrace) {
+            if (!completion.isCompleted) completion.complete(imageBytes);
+            Log.error('RealCugan', '$error\n$stackTrace');
+            UpscaleStatusTracker.instance.finish(
+              requestId,
+              cancelled: error is _CancelledUpscale,
+              success: false,
+              error: error.toString(),
+            );
+          } finally {
+            if (identical(_inFlight[key], completion.future)) {
+              _inFlight.remove(key);
+            }
+          }
+        }),
+      );
+      queued = true;
+      _runQueue();
+      return await completion.future;
+    } catch (error, stackTrace) {
+      if (!completion.isCompleted) completion.complete(imageBytes);
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      if (!queued && identical(_inFlight[key], completion.future)) {
+        _inFlight.remove(key);
+      }
+    }
   }
 
   void _rememberRetry(String key, Future<Uint8List> Function() retry) {
@@ -587,7 +651,9 @@ class RealCuganUpscaler {
   }
 
   Future<Uint8List> _runUpscale(
-    img.Image original,
+    RealCuganImageInput prepared,
+    Uint8List inputPng,
+    Uint8List sourceBytes,
     UpscaleConfig config,
     String requestId,
     int generation,
@@ -595,20 +661,6 @@ class RealCuganUpscaler {
     final tracker = UpscaleStatusTracker.instance;
     final stopwatch = Stopwatch()..start();
     tracker.start(requestId);
-    final input = img.Image(
-      width: original.width,
-      height: original.height,
-      numChannels: 3,
-    );
-    var hasTransparency = false;
-    for (var y = 0; y < original.height; y++) {
-      for (var x = 0; x < original.width; x++) {
-        final pixel = original.getPixel(x, y);
-        if (pixel.a < 255) hasTransparency = true;
-        input.setPixelRgb(x, y, pixel.r, pixel.g, pixel.b);
-      }
-    }
-
     final root = await _runtimeRoot();
     final executable = File(path.join(root, 'realcugan-ncnn-vulkan.exe'));
     final modelName = config.isPro ? 'models-pro' : 'models-se';
@@ -623,7 +675,7 @@ class RealCuganUpscaler {
     try {
       final inputFile = File(path.join(temporaryDirectory.path, 'input.png'));
       final outputFile = File(path.join(temporaryDirectory.path, 'output.png'));
-      await inputFile.writeAsBytes(img.encodePng(input));
+      await inputFile.writeAsBytes(inputPng);
       final args = <String>[
         '-i',
         inputFile.path,
@@ -678,29 +730,24 @@ class RealCuganUpscaler {
       }
       await _recordStage('engine-exited');
       final outputBytes = await outputFile.readAsBytes();
-      final outputWidth = original.width * config.scale;
-      final outputHeight = original.height * config.scale;
+      final outputWidth = prepared.width * config.scale;
+      final outputHeight = prepared.height * config.scale;
       if (!_hasPngDimensions(outputBytes, outputWidth, outputHeight)) {
         throw const _UpscaleException('Real-CUGAN 输出尺寸不正确。');
       }
       await _recordStage(
-        'png-validated; transparent=$hasTransparency; mix=${config.mixRatio}',
+        'png-validated; transparent=${prepared.hasTransparency}; mix=${config.mixRatio}',
       );
       final Uint8List encoded;
-      if (config.mixRatio == 100 && !hasTransparency) {
+      if (config.mixRatio == 100 && !prepared.hasTransparency) {
         encoded = outputBytes;
       } else {
-        final enhanced = img.decodeImage(outputBytes);
-        if (enhanced == null) {
-          throw const _UpscaleException('Real-CUGAN 输出图片损坏。');
-        }
-        final resultImage = _composeOutput(
-          original,
-          enhanced,
-          config.mixRatio,
-          preserveAlpha: hasTransparency,
+        encoded = await composeRealCuganOutput(
+          sourceBytes: sourceBytes,
+          enhancedBytes: outputBytes,
+          mixRatio: config.mixRatio,
+          preserveAlpha: prepared.hasTransparency,
         );
-        encoded = Uint8List.fromList(img.encodePng(resultImage, level: 3));
       }
       await _recordStage('postprocess-complete');
       tracker.setDetails(
@@ -719,55 +766,6 @@ class RealCuganUpscaler {
     } finally {
       temporaryDirectory.delete(recursive: true).ignore();
     }
-  }
-
-  static img.Image _composeOutput(
-    img.Image original,
-    img.Image enhanced,
-    int mixRatio, {
-    required bool preserveAlpha,
-  }) {
-    final width = enhanced.width;
-    final height = enhanced.height;
-    final output = img.Image(
-      width: width,
-      height: height,
-      numChannels: preserveAlpha ? 4 : 3,
-    );
-    final resized = mixRatio == 100
-        ? null
-        : img.copyResize(
-            original,
-            width: width,
-            height: height,
-            interpolation: img.Interpolation.cubic,
-          );
-    final resizedAlpha = preserveAlpha
-        ? img.copyResize(
-            original,
-            width: width,
-            height: height,
-            interpolation: img.Interpolation.cubic,
-          )
-        : null;
-    for (var y = 0; y < height; y++) {
-      for (var x = 0; x < width; x++) {
-        final enhancedPixel = enhanced.getPixel(x, y);
-        final originalPixel = resized?.getPixel(x, y);
-        double channel(num value, num? reference) => originalPixel == null
-            ? value.toDouble()
-            : (value * mixRatio + reference! * (100 - mixRatio)) / 100;
-        output.setPixelRgba(
-          x,
-          y,
-          channel(enhancedPixel.r, originalPixel?.r),
-          channel(enhancedPixel.g, originalPixel?.g),
-          channel(enhancedPixel.b, originalPixel?.b),
-          resizedAlpha?.getPixel(x, y).a ?? 255,
-        );
-      }
-    }
-    return output;
   }
 
   Future<void> _recordStage(String stage) async {

@@ -29,6 +29,7 @@ class ReaderImageProvider
     this.eid,
     this.page, {
     this.compareOriginal = false,
+    this.skipUpscale = false,
   });
 
   final String imageKey;
@@ -42,6 +43,9 @@ class ReaderImageProvider
   final int page;
 
   final bool compareOriginal;
+
+  /// Keeps a gallery pre-cache from occupying the visible upscale queue.
+  final bool skipUpscale;
 
   @override
   Future<Uint8List> load(chunkEvents, checkStop) async {
@@ -141,17 +145,17 @@ class ReaderImageProvider
     // 超分在 ImageProvider.load 阶段处理，保持各阅读模式行为一致。
     final anime4KVersion =
         appdata.settings.getReaderSetting(
-              cid,
-              sourceKey ?? "",
-              'anime4KVersion',
-            ) ??
-            'v1';
+          cid,
+          sourceKey ?? "",
+          'anime4KVersion',
+        ) ??
+        'v1';
     final enableAnime4K =
         appdata.settings.getReaderSetting(
-              cid,
-              sourceKey ?? "",
-              'enableAnime4K',
-            ) ==
+          cid,
+          sourceKey ?? "",
+          'enableAnime4K',
+        ) ==
         true;
     if (App.isWindows) {
       try {
@@ -159,7 +163,10 @@ class ReaderImageProvider
           comicId: cid,
           sourceKey: sourceKey ?? '',
         );
-        if (config.enabled && !compareOriginal && config.isLegacy) {
+        if (config.enabled &&
+            !compareOriginal &&
+            !skipUpscale &&
+            config.isLegacy) {
           if (Anime4KV4ModelManager.selectedDef.id != config.selectedModelId) {
             await Anime4KV4Service.instance.setModel(config.selectedModelId);
           }
@@ -170,7 +177,7 @@ class ReaderImageProvider
             label: '${'Page'.tl} $page',
           );
           if (result != null) bytes = result;
-        } else if (config.enabled && !compareOriginal) {
+        } else if (config.enabled && !compareOriginal && !skipUpscale) {
           bytes = await RealCuganUpscaler.instance.processImage(
             imageBytes: bytes,
             cacheKey: '$imageKey@$sourceKey@$cid@$eid',
@@ -299,7 +306,8 @@ class ReaderImageProvider
     final rawVariant = compareOriginal ? '|raw' : '';
     if (!App.isWindows) return '$base$rawVariant';
     final config = RealCuganUpscaler.currentConfig(cid, sourceKey ?? '');
-    return '$base$rawVariant|upscale:${config.id}:${config.enabled}';
+    final preCacheVariant = skipUpscale ? '|upscale-prefetch' : '';
+    return '$base$rawVariant|upscale:${config.id}:${config.enabled}$preCacheVariant';
   }
 
   @override

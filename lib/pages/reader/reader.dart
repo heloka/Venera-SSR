@@ -235,14 +235,13 @@ class _ReaderState extends State<Reader>
     setImageCacheSize();
     if (App.isWindows) {
       unawaited(
-        RealCuganUpscaler.loadConfig(
-          comicId: cid,
-          sourceKey: type.sourceKey,
-        ).then((_) {
-          if (mounted) update();
-        }).catchError((Object error, StackTrace stackTrace) {
-          Log.error('Reader', '读取超分配置失败：$error', stackTrace);
-        }),
+        RealCuganUpscaler.loadConfig(comicId: cid, sourceKey: type.sourceKey)
+            .then((_) {
+              if (mounted) update();
+            })
+            .catchError((Object error, StackTrace stackTrace) {
+              Log.error('Reader', '读取超分配置失败：$error', stackTrace);
+            }),
       );
     }
     Future.delayed(const Duration(milliseconds: 200), () {
@@ -288,9 +287,7 @@ class _ReaderState extends State<Reader>
 
   @override
   void dispose() {
-    if (isFullscreen) {
-      fullscreen();
-    }
+    _restoreWindowedMode();
     autoPageTurningTimer?.cancel();
     if (App.isWindows) {
       unawaited(RealCuganUpscaler.instance.cancelPending('阅读器已关闭'));
@@ -331,7 +328,19 @@ class _ReaderState extends State<Reader>
 
   void onKeyEvent(KeyEvent event) {
     if (event.logicalKey == LogicalKeyboardKey.f12 && event is KeyUpEvent) {
-      fullscreen();
+      unawaited(
+        fullscreen().then<void>(
+          (_) {
+            if (mounted) context.readerScaffold.update();
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            Log.error(
+              'Reader',
+              'Fullscreen toggle failed: $error\n$stackTrace',
+            );
+          },
+        ),
+      );
     }
     _imageViewController?.handleKeyEvent(event);
   }
@@ -680,9 +689,19 @@ abstract mixin class _ReaderLocation {
       update();
       if (enablePageAnimation(cid, type)) {
         _animationCount++;
-        _imageViewController!.animateToPage(page).then((_) {
-          _animationCount--;
-        });
+        unawaited(
+          _imageViewController!
+              .animateToPage(page)
+              .then<void>(
+                (_) => _animationCount--,
+                onError: (Object error, StackTrace stackTrace) {
+                  _animationCount--;
+                  if (error is! TickerCanceled) {
+                    Error.throwWithStackTrace(error, stackTrace);
+                  }
+                },
+              ),
+        );
       } else {
         _imageViewController!.toPage(page);
       }
@@ -744,6 +763,10 @@ abstract mixin class _ReaderLocation {
 
 mixin class _ReaderWindow {
   bool isFullscreen = false;
+  bool _fullscreenChangeInProgress = false;
+  bool? _fullscreenTransitionTarget;
+  bool? _pendingFullscreenState;
+  Future<void>? _fullscreenTransition;
 
   late WindowFrameController windowFrame;
 
@@ -756,13 +779,54 @@ mixin class _ReaderWindow {
     _isInit = true;
   }
 
-  void fullscreen() async {
-    if (!App.isDesktop) return;
-    await windowManager.hide();
-    await windowManager.setFullScreen(!isFullscreen);
-    await windowManager.show();
-    isFullscreen = !isFullscreen;
-    WindowFrame.of(App.rootContext).setWindowFrame(!isFullscreen);
+  Future<void> fullscreen() {
+    if (!App.isDesktop) return Future<void>.value();
+    final currentTarget =
+        _pendingFullscreenState ?? _fullscreenTransitionTarget ?? isFullscreen;
+    return _setFullscreen(!currentTarget);
+  }
+
+  Future<void> _setFullscreen(bool target) {
+    _pendingFullscreenState = target;
+    if (_fullscreenChangeInProgress) {
+      return _fullscreenTransition ?? Future<void>.value();
+    }
+    _fullscreenChangeInProgress = true;
+    final transition = _drainFullscreenChanges();
+    _fullscreenTransition = transition;
+    return transition;
+  }
+
+  Future<void> _drainFullscreenChanges() async {
+    try {
+      while (_pendingFullscreenState != null) {
+        final nextIsFullscreen = _pendingFullscreenState!;
+        _pendingFullscreenState = null;
+        if (nextIsFullscreen == isFullscreen) continue;
+        _fullscreenTransitionTarget = nextIsFullscreen;
+        await windowManager.setFullScreen(nextIsFullscreen);
+        isFullscreen = nextIsFullscreen;
+        WindowFrame.of(App.rootContext).setWindowFrame(!nextIsFullscreen);
+        _fullscreenTransitionTarget = null;
+      }
+    } finally {
+      _fullscreenTransitionTarget = null;
+      _fullscreenChangeInProgress = false;
+      _fullscreenTransition = null;
+      if (_pendingFullscreenState != null) {
+        unawaited(_setFullscreen(_pendingFullscreenState!));
+      }
+    }
+  }
+
+  void _restoreWindowedMode() {
+    if (!App.isDesktop ||
+        (!isFullscreen &&
+            _fullscreenTransitionTarget != true &&
+            _pendingFullscreenState != true)) {
+      return;
+    }
+    unawaited(_setFullscreen(false));
   }
 
   bool onWindowClose() {

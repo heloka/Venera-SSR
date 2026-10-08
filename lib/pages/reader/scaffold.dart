@@ -14,9 +14,8 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
   static const kTopBarHeight = 56.0;
 
-  double get kBottomBarHeight => context.reader.isOnChapterCommentsPage
-      ? 105.0
-      : 153.0;
+  double get kBottomBarHeight =>
+      context.reader.isOnChapterCommentsPage ? 105.0 : 153.0;
 
   Timer? _controlsHideTimer;
 
@@ -455,9 +454,21 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
         Tooltip(
           message: "${"Full Screen".tl}(F12)",
           child: IconButton(
-            icon: const Icon(Icons.fullscreen),
-            onPressed: () {
-              context.reader.fullscreen();
+            icon: Icon(
+              context.reader.isFullscreen
+                  ? Icons.fullscreen_exit
+                  : Icons.fullscreen,
+            ),
+            onPressed: () async {
+              try {
+                await context.reader.fullscreen();
+              } catch (error, stackTrace) {
+                Log.error(
+                  'Reader',
+                  'Fullscreen toggle failed: $error\n$stackTrace',
+                );
+              }
+              if (mounted) setState(() {});
             },
           ),
         ),
